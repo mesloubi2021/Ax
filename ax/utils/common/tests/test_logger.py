@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import logging
 from tempfile import NamedTemporaryFile
 from unittest.mock import patch
@@ -17,6 +19,7 @@ BASE_LOGGER_NAME = f"ax.{__name__}"
 
 class LoggerTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.warning_string = "Test warning"
 
     def test_Logger(self) -> None:

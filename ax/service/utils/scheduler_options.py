@@ -3,10 +3,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+# pyre-strict
+
+from dataclasses import dataclass, field
 from enum import Enum
 from logging import INFO
-from typing import Optional
+from typing import Any
 
 from ax.early_stopping.strategies import BaseEarlyStoppingStrategy
 from ax.global_stopping.strategies.base import BaseGlobalStoppingStrategy
@@ -96,27 +98,52 @@ class SchedulerOptions:
         global_stopping_strategy: A ``BaseGlobalStoppingStrategy`` that determines
             whether the full optimization should be stopped or not.
         suppress_storage_errors_after_retries: Whether to fully suppress SQL
-            storage-related errors if encounted, after retrying the call
+            storage-related errors if encountered, after retrying the call
             multiple times. Only use if SQL storage is not important for the given
             use case, since this will only log, but not raise, an exception if
             it's encountered while saving to DB or loading from it.
+        wait_for_running_trials: Whether the scheduler should wait for running trials
+            or exit.
+        fetch_kwargs: Kwargs to be used when fetching data.
+        validate_metrics: Whether to raise an error if there is a problem with the
+            metrics attached to the experiment.
+        status_quo_weight: The weight of the status quo arm. This is only used
+            if the scheduler is using a BatchTrial. This requires that the status_quo
+            be set on the experiment.
+        enforce_immutable_search_space_and_opt_config: Whether to enforce that the
+            search space and optimization config are immutable.  If true, will add
+            `"immutable_search_space_and_opt_config": True` to experiment properties
+        mt_experiment_trial_type: Type of trial to run for MultiTypeExperiments. This
+            is currently required for MultiTypeExperiments. This is ignored for
+            "regular" or single type experiments. If you don't know what a single type
+            experiment is, you don't need this.
+        force_candidate_generation: Whether to force candidate generation even if the
+            generation strategy is not ready to generate candidates, meaning one of the
+            transition criteria with block_gen_if_met is met.
+            **This is not yet implemented.**
     """
 
     max_pending_trials: int = 10
     trial_type: TrialType = TrialType.TRIAL
-    batch_size: Optional[int] = None
-    total_trials: Optional[int] = None
+    batch_size: int | None = None
+    total_trials: int | None = None
     tolerated_trial_failure_rate: float = 0.5
     min_failed_trials_for_failure_rate_check: int = 5
-    log_filepath: Optional[str] = None
+    log_filepath: str | None = None
     logging_level: int = INFO
-    ttl_seconds_for_trials: Optional[int] = None
-    init_seconds_between_polls: Optional[int] = 1
+    ttl_seconds_for_trials: int | None = None
+    init_seconds_between_polls: int | None = 1
     min_seconds_before_poll: float = 1.0
     seconds_between_polls_backoff_factor: float = 1.5
-    timeout_hours: Optional[float] = None
     run_trials_in_batches: bool = False
     debug_log_run_metadata: bool = False
-    early_stopping_strategy: Optional[BaseEarlyStoppingStrategy] = None
-    global_stopping_strategy: Optional[BaseGlobalStoppingStrategy] = None
+    early_stopping_strategy: BaseEarlyStoppingStrategy | None = None
+    global_stopping_strategy: BaseGlobalStoppingStrategy | None = None
     suppress_storage_errors_after_retries: bool = False
+    wait_for_running_trials: bool = True
+    fetch_kwargs: dict[str, Any] = field(default_factory=dict)
+    validate_metrics: bool = True
+    status_quo_weight: float = 0.0
+    enforce_immutable_search_space_and_opt_config: bool = True
+    mt_experiment_trial_type: str | None = None
+    force_candidate_generation: bool = False

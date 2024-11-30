@@ -4,15 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import numpy as np
 from ax.models.discrete_base import DiscreteModel
 from ax.utils.common.testutils import TestCase
 
 
 class DiscreteModelTest(TestCase):
-    def setUp(self) -> None:
-        pass
-
     def test_discrete_model_get_state(self) -> None:
         discrete_model = DiscreteModel()
         self.assertEqual(discrete_model._get_state(), {})

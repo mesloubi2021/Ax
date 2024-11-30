@@ -4,21 +4,21 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import functools
+from collections.abc import Callable
 from copy import deepcopy
 from random import randint
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, Type, Union
+from typing import Any, Protocol
 
 import torch
-from ax.models.model_utils import best_observed_point, get_observed
-from ax.models.torch.utils import _to_inequality_constraints
+from ax.models.model_utils import best_observed_point
 from ax.models.torch_base import TorchModel
 from ax.models.types import TConfig
 from botorch.acquisition import get_acquisition_function
 from botorch.acquisition.acquisition import AcquisitionFunction
-from botorch.acquisition.fixed_feature import FixedFeatureAcquisitionFunction
 from botorch.acquisition.objective import ConstrainedMCObjective, GenericMCObjective
-from botorch.acquisition.penalized import PenalizedMCObjective
 from botorch.acquisition.utils import get_infeasible_cost
 from botorch.exceptions.errors import UnsupportedError
 from botorch.fit import fit_gpytorch_mll
@@ -35,6 +35,7 @@ from botorch.utils import (
     get_outcome_constraint_transforms,
 )
 from botorch.utils.multi_objective.scalarization import get_chebyshev_scalarization
+from botorch.utils.transforms import is_ensemble
 from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.kernels.kernel import Kernel
 from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
@@ -47,23 +48,23 @@ from torch import Tensor
 
 
 MIN_OBSERVED_NOISE_LEVEL = 1e-6
-NO_FEASIBLE_POINTS_MESSAGE = (
-    "There are no feasible observed points.  This likely means that one "
-    "or more outcome constraints or objective thresholds is set too strictly.  "
+NO_OBSERVED_POINTS_MESSAGE = (
+    "There are no observed points meeting all parameter "
+    "constraints or have all necessary metrics attached."
 )
 
 
 def _construct_model(
-    task_feature: Optional[int],
-    Xs: List[Tensor],
-    Ys: List[Tensor],
-    Yvars: List[Tensor],
-    fidelity_features: List[int],
-    metric_names: List[str],
+    task_feature: int | None,
+    Xs: list[Tensor],
+    Ys: list[Tensor],
+    Yvars: list[Tensor],
+    fidelity_features: list[int],
+    metric_names: list[str],
     use_input_warping: bool = False,
-    prior: Optional[Dict[str, Any]] = None,
+    prior: dict[str, Any] | None = None,
     *,
-    multitask_gp_ranks: Optional[Dict[str, Union[Prior, float]]] = None,
+    multitask_gp_ranks: dict[str, Prior | float] | None = None,
     **kwargs: Any,
 ) -> GPyTorchModel:
     """
@@ -138,19 +139,19 @@ def _construct_model(
 
 
 def get_and_fit_model(
-    Xs: List[Tensor],
-    Ys: List[Tensor],
-    Yvars: List[Tensor],
-    task_features: List[int],
-    fidelity_features: List[int],
-    metric_names: List[str],
-    state_dict: Optional[Dict[str, Tensor]] = None,
+    Xs: list[Tensor],
+    Ys: list[Tensor],
+    Yvars: list[Tensor],
+    task_features: list[int],
+    fidelity_features: list[int],
+    metric_names: list[str],
+    state_dict: dict[str, Tensor] | None = None,
     refit_model: bool = True,
     use_input_warping: bool = False,
     use_loocv_pseudo_likelihood: bool = False,
-    prior: Optional[Dict[str, Any]] = None,
+    prior: dict[str, Any] | None = None,
     *,
-    multitask_gp_ranks: Optional[Dict[str, Union[Prior, float]]] = None,
+    multitask_gp_ranks: dict[str, Prior | float] | None = None,
     **kwargs: Any,
 ) -> GPyTorchModel:
     r"""Instantiates and fits a botorch GPyTorchModel using the given data.
@@ -240,12 +241,11 @@ class TAcqfConstructor(Protocol):
         self,  # making this a static method makes Pyre unhappy, better to keep `self`
         model: Model,
         objective_weights: Tensor,
-        outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-        X_observed: Optional[Tensor] = None,
-        X_pending: Optional[Tensor] = None,
+        outcome_constraints: tuple[Tensor, Tensor] | None = None,
+        X_observed: Tensor | None = None,
+        X_pending: Tensor | None = None,
         **kwargs: Any,
-    ) -> AcquisitionFunction:
-        ...  # pragma: no cover
+    ) -> AcquisitionFunction: ...  # pragma: no cover
 
 
 def get_acqf(
@@ -293,12 +293,12 @@ def get_acqf(
         def wrapper(
             model: Model,
             objective_weights: Tensor,
-            outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-            X_observed: Optional[Tensor] = None,
-            X_pending: Optional[Tensor] = None,
+            outcome_constraints: tuple[Tensor, Tensor] | None = None,
+            X_observed: Tensor | None = None,
+            X_pending: Tensor | None = None,
             **kwargs: Any,
         ) -> AcquisitionFunction:
-
+            kwargs.pop("objective_thresholds", None)
             return _get_acquisition_func(
                 model=model,
                 acquisition_function_name=acquisition_function_name,
@@ -341,21 +341,20 @@ def _get_acquisition_func(
     model: Model,
     acquisition_function_name: str,
     objective_weights: Tensor,
-    outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    X_observed: Optional[Tensor] = None,
-    X_pending: Optional[Tensor] = None,
-    mc_objective: Type[GenericMCObjective] = GenericMCObjective,
-    constrained_mc_objective: Optional[
-        Type[ConstrainedMCObjective]
-    ] = ConstrainedMCObjective,
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    X_observed: Tensor | None = None,
+    X_pending: Tensor | None = None,
+    mc_objective: type[GenericMCObjective] = GenericMCObjective,
+    constrained_mc_objective: None
+    | (type[ConstrainedMCObjective]) = ConstrainedMCObjective,
     # pyre-fixme[24]: Generic type `dict` expects 2 type parameters, use
     #  `typing.Dict` to avoid runtime subscripting errors.
-    mc_objective_kwargs: Optional[Dict] = None,
+    mc_objective_kwargs: dict | None = None,
     *,
     chebyshev_scalarization: bool = False,
     prune_baseline: bool = True,
     mc_samples: int = 512,
-    marginalize_dim: Optional[int] = None,
+    marginalize_dim: int | None = None,
 ) -> AcquisitionFunction:
     r"""Instantiates a acquisition function.
 
@@ -401,22 +400,25 @@ def _get_acquisition_func(
         raise NotImplementedError(f"{acquisition_function_name=} not implemented yet.")
 
     if X_observed is None:
-        raise ValueError(NO_FEASIBLE_POINTS_MESSAGE)
+        raise ValueError(NO_OBSERVED_POINTS_MESSAGE)
     # construct Objective module
     if chebyshev_scalarization:
         with torch.no_grad():
             Y = model.posterior(X_observed).mean  # pyre-ignore [16]
+        if is_ensemble(model):
+            Y = torch.mean(Y, dim=0)
         obj_tf = get_chebyshev_scalarization(weights=objective_weights, Y=Y)
     else:
         obj_tf = get_objective_weights_transform(objective_weights)
 
     # pyre-fixme[53]: Captured variable `obj_tf` is not annotated.
-    def objective(samples: Tensor, X: Optional[Tensor] = None) -> Tensor:
+    def objective(samples: Tensor, X: Tensor | None = None) -> Tensor:
         return obj_tf(samples)
 
+    mc_objective_kwargs = {} if mc_objective_kwargs is None else mc_objective_kwargs
+    objective = mc_objective(objective=objective, **mc_objective_kwargs)
+
     if outcome_constraints is None:
-        mc_objective_kwargs = {} if mc_objective_kwargs is None else mc_objective_kwargs
-        objective = mc_objective(objective=objective, **mc_objective_kwargs)
         con_tfs = None
     else:
         con_tfs = get_outcome_constraint_transforms(outcome_constraints)
@@ -429,10 +431,7 @@ def _get_acquisition_func(
                     "constrained_mc_objective cannot be set to None "
                     "when applying outcome constraints."
                 )
-            if issubclass(mc_objective, PenalizedMCObjective):
-                raise RuntimeError(
-                    "Outcome constraints are not supported for PenalizedMCObjective."
-                )
+
             inf_cost = get_infeasible_cost(
                 X=X_observed, model=model, objective=objective
             )
@@ -458,16 +457,16 @@ def scipy_optimizer(
     acq_function: AcquisitionFunction,
     bounds: Tensor,
     n: int,
-    inequality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]] = None,
-    equality_constraints: Optional[List[Tuple[Tensor, Tensor, float]]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    rounding_func: Optional[Callable[[Tensor], Tensor]] = None,
+    inequality_constraints: list[tuple[Tensor, Tensor, float]] | None = None,
+    equality_constraints: list[tuple[Tensor, Tensor, float]] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    rounding_func: Callable[[Tensor], Tensor] | None = None,
     *,
     num_restarts: int = 20,
-    raw_samples: Optional[int] = None,
+    raw_samples: int | None = None,
     joint_optimization: bool = False,
-    options: Optional[Dict[str, Union[bool, float, int, str]]] = None,
-) -> Tuple[Tensor, Tensor]:
+    options: dict[str, bool | float | int | str] | None = None,
+) -> tuple[Tensor, Tensor]:
     r"""Optimizer using scipy's minimize module on a numpy-adpator.
 
     Args:
@@ -498,7 +497,7 @@ def scipy_optimizer(
     """
 
     sequential = not joint_optimization
-    optimize_acqf_options: Dict[str, Union[bool, float, int, str]] = {
+    optimize_acqf_options: dict[str, bool | float | int | str] = {
         "batch_limit": 5,
         "init_batch_limit": 32,
     }
@@ -522,14 +521,14 @@ def scipy_optimizer(
 
 def recommend_best_observed_point(
     model: TorchModel,
-    bounds: List[Tuple[float, float]],
+    bounds: list[tuple[float, float]],
     objective_weights: Tensor,
-    outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    linear_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    model_gen_options: Optional[TConfig] = None,
-    target_fidelities: Optional[Dict[int, float]] = None,
-) -> Optional[Tensor]:
+    outcome_constraints: tuple[Tensor, Tensor] | None = None,
+    linear_constraints: tuple[Tensor, Tensor] | None = None,
+    fixed_features: dict[int, float] | None = None,
+    model_gen_options: TConfig | None = None,
+    target_fidelities: dict[int, float] | None = None,
+) -> Tensor | None:
     """
     A wrapper around `ax.models.model_utils.best_observed_point` for TorchModel
     that recommends a best point from previously observed points using either a
@@ -573,119 +572,20 @@ def recommend_best_observed_point(
     )
     if x_best is None:
         return None
+    # pyre-fixme[16]: Item `ndarray` of `Union[ndarray[typing.Any, typing.Any],
+    #  Tensor]` has no attribute `to`.
     return x_best.to(dtype=model.dtype, device=torch.device("cpu"))
-
-
-def recommend_best_out_of_sample_point(
-    model: TorchModel,
-    bounds: List[Tuple[float, float]],
-    objective_weights: Tensor,
-    outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    linear_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    model_gen_options: Optional[TConfig] = None,
-    target_fidelities: Optional[Dict[int, float]] = None,
-) -> Optional[Tensor]:
-    """
-    Identify the current best point by optimizing the posterior mean of the model.
-    This is "out-of-sample" because it considers un-observed designs as well.
-
-    Return None if no such point can be identified.
-
-    Args:
-        model: A TorchModel.
-        bounds: A list of (lower, upper) tuples for each column of X.
-        objective_weights: The objective is to maximize a weighted sum of
-            the columns of f(x). These are the weights.
-        outcome_constraints: A tuple of (A, b). For k outcome constraints
-            and m outputs at f(x), A is (k x m) and b is (k x 1) such that
-            A f(x) <= b.
-        linear_constraints: A tuple of (A, b). For k linear constraints on
-            d-dimensional x, A is (k x d) and b is (k x 1) such that
-            A x <= b.
-        fixed_features: A map {feature_index: value} for features that
-            should be fixed to a particular value in the best point.
-        model_gen_options: A config dictionary that can contain
-            model-specific options. See `TorchOptConfig` for details.
-        target_fidelities: A map {feature_index: value} of fidelity feature
-            column indices to their respective target fidelities. Used for
-            multi-fidelity optimization.
-
-    Returns:
-        A d-array of the best point, or None if no feasible point exists.
-    """
-    options = model_gen_options or {}
-    fixed_features = fixed_features or {}
-    acf_options = options.get("acquisition_function_kwargs", {})
-    optimizer_options = options.get("optimizer_kwargs", {})
-
-    X_observed = get_observed(
-        Xs=model.Xs,  # pyre-ignore: [16]
-        objective_weights=objective_weights,
-        outcome_constraints=outcome_constraints,
-    )
-
-    if hasattr(model, "_get_best_point_acqf"):
-        acq_function, non_fixed_idcs = model._get_best_point_acqf(  # pyre-ignore: [16]
-            X_observed=X_observed,
-            objective_weights=objective_weights,
-            mc_samples=acf_options.get("mc_samples", 512),
-            fixed_features=fixed_features,
-            target_fidelities=target_fidelities,
-            outcome_constraints=outcome_constraints,
-            seed_inner=acf_options.get("seed_inner", None),
-            qmc=acf_options.get("qmc", True),
-        )
-    else:
-        raise RuntimeError("The model should implement _get_best_point_acqf.")
-
-    inequality_constraints = _to_inequality_constraints(linear_constraints)
-    # TODO: update optimizers to handle inequality_constraints
-    # (including transforming constraints b/c of fixed features)
-    if inequality_constraints is not None:
-        raise UnsupportedError("Inequality constraints are not supported!")
-
-    return_best_only = optimizer_options.get("return_best_only", True)
-    bounds_ = torch.tensor(bounds, dtype=model.dtype, device=model.device)
-    bounds_ = bounds_.transpose(-1, -2)
-    if non_fixed_idcs is not None:
-        bounds_ = bounds_[..., non_fixed_idcs]
-
-    opt_options: Dict[str, Union[bool, float, int, str]] = {
-        "batch_limit": 8,
-        "maxiter": 200,
-        "method": "L-BFGS-B",
-        "nonnegative": False,
-    }
-    opt_options.update(optimizer_options.get("options", {}))
-    candidates, _ = optimize_acqf(
-        acq_function=acq_function,
-        bounds=bounds_,
-        q=1,
-        num_restarts=optimizer_options.get("num_restarts", 60),
-        raw_samples=optimizer_options.get("raw_samples", 1024),
-        inequality_constraints=inequality_constraints,
-        fixed_features=None,  # handled inside the acquisition function
-        options=opt_options,
-        return_best_only=return_best_only,
-    )
-    rec_point = candidates.detach().cpu()
-    if isinstance(acq_function, FixedFeatureAcquisitionFunction):
-        rec_point = acq_function._construct_X_full(rec_point)
-    if return_best_only:
-        rec_point = rec_point.view(-1)
-    return rec_point
 
 
 def _get_model(
     X: Tensor,
     Y: Tensor,
     Yvar: Tensor,
-    task_feature: Optional[int] = None,
-    fidelity_features: Optional[List[int]] = None,
+    task_feature: int | None = None,
+    fidelity_features: list[int] | None = None,
     use_input_warping: bool = False,
-    covar_module: Optional[Kernel] = None,
-    prior: Optional[Dict[str, Any]] = None,
+    covar_module: Kernel | None = None,
+    prior: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> GPyTorchModel:
     """Instantiate a model of type depending on the input data.
@@ -714,7 +614,6 @@ def _get_model(
     is_nan = torch.isnan(Yvar)
     any_nan_Yvar = torch.any(is_nan)
     all_nan_Yvar = torch.all(is_nan)
-    batch_shape = _get_batch_shape(X, Y)
     if any_nan_Yvar and not all_nan_Yvar:
         if task_feature:
             # TODO (jej): Replace with inferred noise before making perf judgements.
@@ -725,10 +624,14 @@ def _get_model(
                 "errors. Variances should all be specified, or none should be."
             )
     if use_input_warping:
+        if Y.shape[-1] > 1 and X.ndim > 2:
+            raise UnsupportedError(
+                "Input warping is not supported for batched multi output models."
+            )
         warp_tf = get_warping_transform(
             d=X.shape[-1],
             task_feature=task_feature,
-            batch_shape=batch_shape,
+            batch_shape=X.shape[:-2],
         )
     else:
         warp_tf = None
@@ -744,7 +647,7 @@ def _get_model(
         covar_module = _get_customized_covar_module(
             covar_module_prior_dict=covar_module_prior_dict,
             ard_num_dims=X.shape[-1],
-            batch_shape=batch_shape,
+            aug_batch_shape=_get_aug_batch_shape(X, Y),
             task_feature=task_feature,
         )
 
@@ -757,7 +660,7 @@ def _get_model(
         gp = SingleTaskMultiFidelityGP(
             train_X=X,
             train_Y=Y,
-            data_fidelity=fidelity_features[0],
+            data_fidelities=fidelity_features[:1],
             input_transform=warp_tf,
             **kwargs,
         )
@@ -768,7 +671,7 @@ def _get_model(
             train_Yvar=None if all_nan_Yvar else Yvar,
             covar_module=covar_module,
             input_transform=warp_tf,
-            **kwargs,
+            **{"outcome_transform": None, **kwargs},
         )
     else:
         # instantiate multitask GP
@@ -800,24 +703,29 @@ def _get_model(
             rank=kwargs.get("rank"),
             task_covar_prior=task_covar_prior,
             input_transform=warp_tf,
+            # specify output_tasks so that model.num_outputs
+            # is 1, since the model is only modeling
+            # a since metric.
+            output_tasks=all_tasks[:1],
         )
     return gp
 
 
 def _get_customized_covar_module(
-    covar_module_prior_dict: Dict[str, Prior],
+    covar_module_prior_dict: dict[str, Prior],
     ard_num_dims: int,
-    batch_shape: torch.Size,
-    task_feature: Optional[int] = None,
+    aug_batch_shape: torch.Size,
+    task_feature: int | None = None,
 ) -> Kernel:
     """Construct a GP kernel based on customized prior dict.
 
     Args:
         covar_module_prior_dict: Dict. The keys are the names of the prior and values
             are the priors. e.g. {"lengthscale_prior": GammaPrior(3.0, 6.0)}.
-        ard_num_dims: The dimension of the input, including task features
-        batch_shape: The batch_shape of the model
-        task_feature: The index of the task feature
+        ard_num_dims: The dimension of the inputs, including task features.
+        aug_batch_shape: The output dimension augmented batch shape of the model
+            (different from the batch shape for batched multi-output models).
+        task_feature: The index of the task feature.
     """
     # TODO: add more checks of covar_module_prior_dict
     if task_feature is not None:
@@ -826,19 +734,19 @@ def _get_customized_covar_module(
         MaternKernel(
             nu=2.5,
             ard_num_dims=ard_num_dims,
-            batch_shape=batch_shape,
+            batch_shape=aug_batch_shape,
             lengthscale_prior=covar_module_prior_dict.get(
                 "lengthscale_prior", GammaPrior(3.0, 6.0)
             ),
         ),
-        batch_shape=batch_shape,
+        batch_shape=aug_batch_shape,
         outputscale_prior=covar_module_prior_dict.get(
             "outputscale_prior", GammaPrior(2.0, 0.15)
         ),
     )
 
 
-def _get_batch_shape(X: Tensor, Y: Tensor) -> torch.Size:
+def _get_aug_batch_shape(X: Tensor, Y: Tensor) -> torch.Size:
     """Obtain the output-augmented batch shape of GP model.
 
     Args:
@@ -857,8 +765,8 @@ def _get_batch_shape(X: Tensor, Y: Tensor) -> torch.Size:
 
 def get_warping_transform(
     d: int,
-    batch_shape: Optional[torch.Size] = None,
-    task_feature: Optional[int] = None,
+    batch_shape: torch.Size | None = None,
+    task_feature: int | None = None,
 ) -> Warp:
     """Construct input warping transform.
 

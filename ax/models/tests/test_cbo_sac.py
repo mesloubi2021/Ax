@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 from typing import cast
 
@@ -11,14 +13,14 @@ import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.models.torch.cbo_sac import SACBO, SACGP
 from ax.utils.common.testutils import TestCase
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 from botorch.models.contextual import LCEAGP
 from botorch.models.model_list_gp_regression import ModelListGP
 from botorch.utils.datasets import SupervisedDataset
 
 
 class SACBOTest(TestCase):
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_SACBO(self) -> None:
         train_X = torch.tensor(
             [[0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0]]
@@ -43,7 +45,6 @@ class SACBOTest(TestCase):
         # test fit
         m1.fit(
             datasets=[dataset],
-            metric_names=metric_names,
             search_space_digest=SearchSpaceDigest(
                 feature_names=feature_names,
                 bounds=[(0.0, 1.0) for _ in range(4)],
@@ -81,7 +82,6 @@ class SACBOTest(TestCase):
         m2 = SACBO(decomposition={"1": ["x1", "x3"], "2": ["x2", "x4"]})
         m2.fit(
             datasets=[dataset],
-            metric_names=metric_names,
             search_space_digest=SearchSpaceDigest(
                 feature_names=["x1", "x2", "x3", "x4"],
                 bounds=[(0.0, 1.0) for _ in range(4)],
@@ -96,7 +96,6 @@ class SACBOTest(TestCase):
         with self.assertRaises(ValueError):
             m2.fit(
                 datasets=[dataset],
-                metric_names=metric_names,
                 search_space_digest=SearchSpaceDigest(
                     feature_names=[],
                     bounds=[(0.0, 1.0) for _ in range(4)],
@@ -107,7 +106,6 @@ class SACBOTest(TestCase):
         with self.assertRaises(AssertionError):
             m2.fit(
                 datasets=[dataset],
-                metric_names=metric_names,
                 search_space_digest=SearchSpaceDigest(
                     feature_names=["x0", "x1", "x2", "x3"],
                     bounds=[(0.0, 1.0) for _ in range(4)],

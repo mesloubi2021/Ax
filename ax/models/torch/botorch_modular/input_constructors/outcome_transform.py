@@ -3,10 +3,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 from ax.utils.common.typeutils import _argparse_type_encoder
 from botorch.models.transforms.outcome import OutcomeTransform, Standardize
@@ -20,10 +22,10 @@ outcome_transform_argparse = Dispatcher(
 
 @outcome_transform_argparse.register(OutcomeTransform)
 def _outcome_transform_argparse_base(
-    outcome_transform_class: Type[OutcomeTransform],
-    dataset: Optional[SupervisedDataset] = None,
-    outcome_transform_options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    outcome_transform_class: type[OutcomeTransform],
+    dataset: SupervisedDataset | None = None,
+    outcome_transform_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Extract the outcome transform kwargs from the given arguments.
 
@@ -46,10 +48,10 @@ def _outcome_transform_argparse_base(
 
 @outcome_transform_argparse.register(Standardize)
 def _outcome_transform_argparse_standardize(
-    outcome_transform_class: Type[Standardize],
+    outcome_transform_class: type[Standardize],
     dataset: SupervisedDataset,
-    outcome_transform_options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    outcome_transform_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Extract the outcome transform kwargs form the given arguments.
 
     Args:

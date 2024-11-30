@@ -4,8 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import math
-from typing import Tuple
 
 import pandas as pd
 import plotly.graph_objs as go
@@ -42,7 +43,7 @@ def table_view_plot(
     use_empirical_bayes: bool = True,
     only_data_frame: bool = False,
     arm_noun: str = "arm",
-) -> Tuple[DataFrame]:
+) -> tuple[DataFrame]:
     """Table of means and confidence intervals.
 
     Table is of the form:
@@ -121,10 +122,7 @@ def table_view_plot(
             ]
         )
         records.append(
-            [
-                "{:.3f} &plusmn; {:.3f}".format(y, Z * y_se)
-                for (_, y, y_se) in results_by_arm
-            ]
+            [f"{y:.3f} &plusmn; {Z * y_se:.3f}" for (_, y, y_se) in results_by_arm]
         )
         records_with_mean.append({arm_name: y for (arm_name, y, _) in results_by_arm})
         records_with_ci.append(
@@ -160,4 +158,5 @@ def table_view_plot(
     )
     fig = go.Figure(data=[trace], layout=layout)
     # pyre-fixme[7]: Expected `Tuple[DataFrame]` but got `AxPlotConfig`.
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)

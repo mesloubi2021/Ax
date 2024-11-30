@@ -4,21 +4,29 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from __future__ import annotations
+
 from logging import Logger
-from typing import List, Tuple, Union
+from typing import Union
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.data import Data
 from ax.utils.common.logger import get_logger
 
 logger: Logger = get_logger(__name__)
-num_mixed = Union[np.ndarray, List[float]]
+# pyre-fixme[24]: Generic type `np.ndarray` expects 2 type parameters.
+num_mixed = Union[np.ndarray, list[float]]
 
 
 def inverse_variance_weight(
-    means: np.ndarray, variances: np.ndarray, conflicting_noiseless: str = "warn"
-) -> Tuple[float, float]:
+    means: npt.NDArray,
+    variances: npt.NDArray,
+    conflicting_noiseless: str = "warn",
+) -> tuple[float, float]:
     """Perform inverse variance weighting.
 
     Args:
@@ -55,7 +63,9 @@ def inverse_variance_weight(
 
 
 def total_variance(
-    means: np.ndarray, variances: np.ndarray, sample_sizes: np.ndarray
+    means: npt.NDArray,
+    variances: npt.NDArray,
+    sample_sizes: npt.NDArray,
 ) -> float:
     """Compute total variance."""
     variances = variances * sample_sizes
@@ -67,8 +77,9 @@ def total_variance(
 
 
 def positive_part_james_stein(
-    means: num_mixed, sems: num_mixed
-) -> Tuple[np.ndarray, np.ndarray]:
+    means: num_mixed,
+    sems: num_mixed,
+) -> tuple[npt.NDArray, npt.NDArray]:
     """Estimation method for Positive-part James-Stein estimator.
 
     This method takes a vector of K means (`y_i`) and standard errors
@@ -130,24 +141,32 @@ def positive_part_james_stein(
         phi_i = 1
     else:
         phi_i = np.minimum(1, sigma2_i / s2)
+    # pyre-fixme[6]: For 1st argument expected `int` but got `floating[typing.Any]`.
+    # pyre-fixme[6]: For 1st argument expected `bool` but got `ndarray[typing.Any,
+    #  dtype[typing.Any]]`.
     mu_hat_i = y_i + phi_i * (ybar - y_i)
     sigma_hat_i = np.sqrt(
+        # pyre-fixme[58]: `-` is not supported for operand types `int` and
+        #  `Union[np.ndarray[typing.Any, np.dtype[typing.Any]], int]`.
         (1 - phi_i) * sigma2_i
         + phi_i * sigma2_i / K
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `Union[np.ndarray[typing.Any, np.dtype[typing.Any]], int]`.
         + 2 * phi_i**2 * (y_i - ybar) ** 2 / (K - 3)
     )
     return mu_hat_i, sigma_hat_i
 
 
 def relativize(
-    means_t: Union[np.ndarray, List[float], float],
-    sems_t: Union[np.ndarray, List[float], float],
+    means_t: npt.NDArray | list[float] | float,
+    sems_t: npt.NDArray | list[float] | float,
     mean_c: float,
     sem_c: float,
     bias_correction: bool = True,
-    cov_means: Union[np.ndarray, List[float], float] = 0.0,
+    cov_means: npt.NDArray | list[float] | float = 0.0,
     as_percent: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
+    control_as_constant: bool = False,
+) -> tuple[npt.NDArray, npt.NDArray]:
     """Ratio estimator based on the delta method.
 
     This uses the delta method (i.e. a Taylor series approximation) to estimate
@@ -195,6 +214,9 @@ def relativize(
             the means and standard errors of the ratios.
         cov_means: Sample covariance between test and control
         as_percent: If true, return results in percent (* 100)
+        control_as_constant: If true, control is treated as a constant.
+            bias_correction, sem_c, and cov_means are ignored when this is true.
+
 
     Returns:
         rel_hat: Inferred means of the sampling distribution of
@@ -207,7 +229,7 @@ def relativize(
     epsilon = 1e-10
     if np.any(np.abs(mean_c) < epsilon):
         raise ValueError(
-            "mean_control ({0} +/- {1}) is smaller than 1 in 10 billion, "
+            "mean_control ({} +/- {}) is smaller than 1 in 10 billion, "
             "which is too small to reliably analyze ratios using the delta "
             "method. This usually occurs because winsorization has truncated "
             "all values down to zero. Try using a delta type that applies "
@@ -216,14 +238,20 @@ def relativize(
     m_t = np.array(means_t)
     s_t = np.array(sems_t)
     cov_t = np.array(cov_means)
-    c = m_t / mean_c
-    r_hat = (m_t - mean_c) / np.abs(mean_c)
-    if bias_correction:
-        r_hat = r_hat - m_t * sem_c**2 / np.abs(mean_c) ** 3
-    # If everything's the same, then set r_hat to zero
-    same = (m_t == mean_c) & (s_t == sem_c)
-    r_hat = ~same * r_hat
-    var = ((s_t**2) - 2 * c * cov_t + (c**2) * (sem_c**2)) / (mean_c**2)
+    abs_mean_c = np.abs(mean_c)
+    r_hat = (m_t - mean_c) / abs_mean_c
+
+    if control_as_constant:
+        var = (s_t / abs_mean_c) ** 2
+    else:
+        c = m_t / mean_c
+        if bias_correction:
+            r_hat = r_hat - m_t * sem_c**2 / abs_mean_c**3
+
+        # If everything's the same, then set r_hat to zero
+        same = (m_t == mean_c) & (s_t == sem_c)
+        r_hat = ~same * r_hat
+        var = ((s_t**2) - 2 * c * cov_t + (c**2) * (sem_c**2)) / (mean_c**2)
     if as_percent:
         return (r_hat * 100, np.sqrt(var) * 100)
     else:
@@ -231,14 +259,15 @@ def relativize(
 
 
 def unrelativize(
-    means_t: Union[np.ndarray, List[float], float],
-    sems_t: Union[np.ndarray, List[float], float],
+    means_t: npt.NDArray | list[float] | float,
+    sems_t: npt.NDArray | list[float] | float,
     mean_c: float,
     sem_c: float,
     bias_correction: bool = True,
-    cov_means: Union[np.ndarray, List[float], float] = 0.0,
+    cov_means: npt.NDArray | list[float] | float = 0.0,
     as_percent: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
+    control_as_constant: bool = False,
+) -> tuple[npt.NDArray, npt.NDArray]:
     """
     Reverse operation of ax.utils.stats.statstools.relativize.
 
@@ -252,12 +281,13 @@ def unrelativize(
         cov_means: Sample covariance between the **unrelativized** test and control
         as_percent: If true, assuming `means_t` and `sems_t` are percentages
                     (i.e., 1 means 1%).
+        control_as_constant: If true, control is treated as a constant.
+            bias_correction, sem_c, and cov_means are ignored when this is true.
 
     Returns:
         m_t: Inferred sample (test) means in the unrelativized scale
         s_t: Inferred SEM of sample (test) means in the unrelativized scale
     """
-
     means_t = np.array(means_t, dtype=float)
     sems_t = np.array(sems_t, dtype=float)
 
@@ -265,15 +295,22 @@ def unrelativize(
         means_t = means_t / 100
         sems_t = sems_t / 100
 
-    m_t = means_t * np.abs(mean_c) + mean_c
-    if bias_correction:
-        m_t = m_t / (1 - (sem_c / np.abs(mean_c)) ** 2)
+    abs_mean_c = np.abs(mean_c)
+    m_t = means_t * abs_mean_c + mean_c
 
-    var = sems_t**2
-    c = m_t / mean_c
-    s_t2 = var * (mean_c**2) + 2 * c * cov_means - (c**2) * (sem_c**2)
-    # s_t2 can be numerically negative
-    s_t = np.sqrt(s_t2.clip(min=0.0))
+    if control_as_constant:
+        s_t = sems_t * abs_mean_c
+    else:
+        if bias_correction:
+            m_t = m_t / (1 - (sem_c / abs_mean_c) ** 2)
+
+        var = sems_t**2
+        c = m_t / mean_c
+        s_t2 = var * (mean_c**2) + 2 * c * cov_means - (c**2) * (sem_c**2)
+
+        # This is only positive when sems_t > sem_c * mean_c * (means_t + 1)
+        # If above condition cannot be guaranteed, use control_as_constant = True
+        s_t = np.sqrt(s_t2.clip(min=0.0))
 
     # if means_t is 0.0 exactly, return control mean and sem directly
     if np.isscalar(means_t):
@@ -284,15 +321,19 @@ def unrelativize(
         m_t[means_t == 0.0] = mean_c
         s_t[means_t == 0.0] = sem_c
 
+    # pyre-fixme[7]: Expected `Tuple[ndarray[typing.Any, typing.Any],
+    #  ndarray[typing.Any, typing.Any]]` but got `Tuple[Union[ndarray[typing.Any,
+    #  dtype[typing.Any]], float], Union[ndarray[typing.Any, dtype[typing.Any]],
+    #  float]]`.
     return m_t, s_t
 
 
 def agresti_coull_sem(
-    n_numer: Union[pd.Series, np.ndarray, int],
-    n_denom: Union[pd.Series, np.ndarray, int],
+    n_numer: pd.Series | npt.NDArray | int,
+    n_denom: pd.Series | npt.NDArray | int,
     prior_successes: int = 2,
     prior_failures: int = 2,
-) -> Union[np.ndarray, float]:
+) -> npt.NDArray | float:
     """Compute the Agresti-Coull style standard error for a binomial proportion.
 
     Reference:
@@ -331,7 +372,6 @@ def marginal_effects(df: pd.DataFrame) -> pd.DataFrame:
     covariates = [col for col in df.columns if col not in ["mean", "sem"]]
     formatted_vals = []
     overall_mean, overall_sem = inverse_variance_weight(
-        # pyre-fixme[6]: Expected `ndarray` for 1st param but got `Series`.
         df["mean"],
         np.power(df["sem"], 2),
     )
@@ -363,6 +403,7 @@ def relativize_data(
     as_percent: bool = False,
     include_sq: bool = False,
     bias_correction: bool = True,
+    control_as_constant: bool = False,
 ) -> Data:
     """Relativize a data object w.r.t. a status_quo arm.
 
@@ -375,6 +416,8 @@ def relativize_data(
             metric values. Uses a second-order Taylor expansion for approximating
             the means and standard errors or the ratios, see
             ax.utils.stats.statstools.relativize for more details.
+        control_as_constant: If true, control is treated as a constant.
+            bias_correction is ignored when this is true.
 
     Returns:
         The new data object with the relativized metrics (excluding the
@@ -391,7 +434,9 @@ def relativize_data(
     for grp in grouped_df.groups.keys():
         subgroup_df = grouped_df.get_group(grp)
         is_sq = subgroup_df["arm_name"] == status_quo_name
-        sq_mean, sq_sem = subgroup_df[is_sq][["mean", "sem"]].values.flatten()
+        sq_mean, sq_sem = (
+            subgroup_df[is_sq][["mean", "sem"]].drop_duplicates().values.flatten()
+        )
 
         # rm status quo from final df to relativize
         if not include_sq:
@@ -403,6 +448,7 @@ def relativize_data(
             sem_c=sq_sem,
             as_percent=as_percent,
             bias_correction=bias_correction,
+            control_as_constant=control_as_constant,
         )
         dfs.append(
             pd.concat(

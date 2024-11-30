@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 """
 Mixed integer extensions of some common synthetic test functions.
 These are adapted from [Daulton2022bopr]_.
@@ -16,44 +18,50 @@ References
     35, 2022.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Type
-
-from ax.benchmark.benchmark_problem import BenchmarkProblem
-from ax.core.objective import Objective
-from ax.core.optimization_config import OptimizationConfig
+from ax.benchmark.benchmark_problem import BenchmarkProblem, get_soo_opt_config
+from ax.benchmark.benchmark_test_functions.botorch_test import BoTorchTestFunction
 from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace
-from ax.metrics.botorch_test_problem import BotorchTestProblemMetric
-from ax.runners.botorch_test_problem import BotorchTestProblemRunner
-from botorch.test_functions.synthetic import (
-    Ackley,
-    Hartmann,
-    Rosenbrock,
-    SyntheticTestFunction,
-)
+from botorch.test_functions.synthetic import Ackley, Hartmann, Rosenbrock
 
 
 def _get_problem_from_common_inputs(
-    bounds: List[Tuple[float, float]],
+    *,
+    bounds: list[tuple[float, float]],
     dim_int: int,
     metric_name: str,
-    infer_noise: bool,
-    test_problem_class: Type[SyntheticTestFunction],
+    lower_is_better: bool,
+    observe_noise_sd: bool,
+    test_problem_class: type[Hartmann | Ackley | Rosenbrock],
     benchmark_name: str,
     num_trials: int,
-    test_problem_bounds: Optional[List[Tuple[float, float]]] = None,
+    optimal_value: float,
+    test_problem_bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """This is a helper that deduplicates common bits of the below problems.
 
     Args:
-        bounds: The parameter bounds.
+        bounds: The parameter bounds. These will be passed to
+            `BotorchTestFunction` as `modified_bounds`, and the parameters
+            will be renormalized from these bounds to the bounds of the original
+            problem. For example, if `bounds` are [(0, 3)] and the test
+            problem's original bounds are [(0, 2)], then the original problem
+            can be evaluated at 0, 2/3, 4/3, and 2.
         dim_int: The number of integer dimensions. First `dim_int` parameters
             are assumed to be integers.
         metric_name: The name of the metric.
-        infer_noise: Whether to infer noise or assume noise-free objective.
+        lower_is_better: If true, the goal is to minimize the metric.
+        observe_noise_sd: Whether to report the standard deviation of the
+            observation noise.
         test_problem_class: The BoTorch test problem class.
         benchmark_name: The name of the benchmark problem.
         num_trials: The number of trials.
+        optimal_value: Best attainable value, if known. If unknown, as may be
+            the case for mixed-integer problems, choose a value that is known to
+            be at least as good as the true optimum, to prevent benchmarks from
+            attaining scores of over 100%. One strategy for choosing this value
+            is to choose the overall optimum of the problem without regard to
+            the integer restrictions.
         test_problem_bounds: Optional bounds to evaluate the base test problem on.
             These are passed in as `bounds` while initializing the test problem.
 
@@ -65,46 +73,44 @@ def _get_problem_from_common_inputs(
         parameters=[
             RangeParameter(
                 name=f"x{i + 1}",
-                parameter_type=ParameterType.INT
-                if i < dim_int
-                else ParameterType.FLOAT,
+                parameter_type=(
+                    ParameterType.INT if i < dim_int else ParameterType.FLOAT
+                ),
                 lower=bounds[i][0],
                 upper=bounds[i][1],
             )
             for i in range(dim)
         ]
     )
-    optimization_config = OptimizationConfig(
-        objective=Objective(
-            metric=BotorchTestProblemMetric(
-                name=metric_name,
-                noise_sd=None if infer_noise else 0.0,
-            ),
-            minimize=True,
-        )
+    optimization_config = get_soo_opt_config(
+        outcome_names=[metric_name],
+        lower_is_better=lower_is_better,
+        observe_noise_sd=observe_noise_sd,
     )
-    test_problem_kwargs: Dict[str, Any] = {"dim": dim}
-    if test_problem_bounds is not None:
-        test_problem_kwargs["bounds"] = test_problem_bounds
-    runner = BotorchTestProblemRunner(
-        test_problem_class=test_problem_class,
-        test_problem_kwargs=test_problem_kwargs,
+
+    if test_problem_bounds is None:
+        test_problem = test_problem_class(dim=dim)
+    else:
+        test_problem = test_problem_class(dim=dim, bounds=test_problem_bounds)
+    test_function = BoTorchTestFunction(
+        botorch_problem=test_problem,
         modified_bounds=bounds,
+        outcome_names=[metric_name],
     )
     return BenchmarkProblem(
-        name=benchmark_name,
+        name=benchmark_name + ("_observed_noise" if observe_noise_sd else ""),
         search_space=search_space,
         optimization_config=optimization_config,
-        runner=runner,
+        test_function=test_function,
         num_trials=num_trials,
-        infer_noise=infer_noise,
+        optimal_value=optimal_value,
     )
 
 
 def get_discrete_hartmann(
     num_trials: int = 50,
-    infer_noise: bool = True,
-    bounds: Optional[List[Tuple[float, float]]] = None,
+    observe_noise_sd: bool = False,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """6D Hartmann problem where first 4 dimensions are discretized."""
     dim_int = 4
@@ -121,17 +127,22 @@ def get_discrete_hartmann(
         bounds=bounds,
         dim_int=dim_int,
         metric_name="Hartmann",
-        infer_noise=infer_noise,
+        lower_is_better=True,
+        observe_noise_sd=observe_noise_sd,
         test_problem_class=Hartmann,
         benchmark_name="Discrete Hartmann",
         num_trials=num_trials,
+        # The best value we've found so far on this mixed problem is -2.89. The
+        # optimum without regards to the integer constraints is -3.3224, but
+        # that won't be attainable here.
+        optimal_value=-3.0,
     )
 
 
 def get_discrete_ackley(
     num_trials: int = 50,
-    infer_noise: bool = True,
-    bounds: Optional[List[Tuple[float, float]]] = None,
+    observe_noise_sd: bool = False,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """13D Ackley problem where first 10 dimensions are discretized.
 
@@ -149,18 +160,22 @@ def get_discrete_ackley(
         bounds=bounds,
         dim_int=dim_int,
         metric_name="Ackley",
-        infer_noise=infer_noise,
+        lower_is_better=True,
+        observe_noise_sd=observe_noise_sd,
         test_problem_class=Ackley,
         benchmark_name="Discrete Ackley",
         num_trials=num_trials,
         test_problem_bounds=[(0.0, 1.0)] * dim,
+        # Ackley's lowest value is at (0, 0, ..., 0), which is in the search
+        # space, so the restriction to integers doesn't change the optimum
+        optimal_value=0.0,
     )
 
 
 def get_discrete_rosenbrock(
     num_trials: int = 50,
-    infer_noise: bool = True,
-    bounds: Optional[List[Tuple[float, float]]] = None,
+    observe_noise_sd: bool = False,
+    bounds: list[tuple[float, float]] | None = None,
 ) -> BenchmarkProblem:
     """10D Rosenbrock problem where first 6 dimensions are discretized."""
     dim_int = 6
@@ -173,8 +188,12 @@ def get_discrete_rosenbrock(
         bounds=bounds,
         dim_int=dim_int,
         metric_name="Rosenbrock",
-        infer_noise=infer_noise,
+        lower_is_better=True,
+        observe_noise_sd=observe_noise_sd,
         test_problem_class=Rosenbrock,
         benchmark_name="Discrete Rosenbrock",
         num_trials=num_trials,
+        # Rosenbrock's lowest value is at (1, 1, ..., 1), which is in the search
+        # space, so the restriction to integers doesn't change the optimum
+        optimal_value=0.0,
     )

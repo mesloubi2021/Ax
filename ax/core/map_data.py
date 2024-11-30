@@ -3,13 +3,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
+from copy import deepcopy
 from logging import Logger
-from typing import Any, Dict, Generic, Iterable, List, Optional, Sequence, Type, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
-
 import pandas as pd
 from ax.core.data import Data
 from ax.core.types import TMapTrialEvaluation
@@ -18,7 +21,11 @@ from ax.utils.common.base import SortableBase
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.equality import dataframe_equals
 from ax.utils.common.logger import get_logger
-from ax.utils.common.serialization import serialize_init_args
+from ax.utils.common.serialization import (
+    serialize_init_args,
+    TClassDecoderRegistry,
+    TDecoderRegistry,
+)
 from ax.utils.common.typeutils import checked_cast
 
 logger: Logger = get_logger(__name__)
@@ -58,8 +65,12 @@ class MapKeyInfo(Generic[T], SortableBase):
     @property
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    def value_type(self) -> Type:
+    def value_type(self) -> type:
         return type(self._default_value)
+
+    def clone(self) -> MapKeyInfo[T]:
+        """Return a copy of this MapKeyInfo."""
+        return MapKeyInfo(key=self.key, default_value=deepcopy(self.default_value))
 
 
 class MapData(Data):
@@ -85,17 +96,17 @@ class MapData(Data):
     DEDUPLICATE_BY_COLUMNS = ["arm_name", "metric_name"]
 
     _map_df: pd.DataFrame
-    _memo_df: Optional[pd.DataFrame]
+    _memo_df: pd.DataFrame | None
 
     # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-    _map_key_infos: List[MapKeyInfo]
+    _map_key_infos: list[MapKeyInfo]
 
     def __init__(
         self,
-        df: Optional[pd.DataFrame] = None,
+        df: pd.DataFrame | None = None,
         # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-        map_key_infos: Optional[Iterable[MapKeyInfo]] = None,
-        description: Optional[str] = None,
+        map_key_infos: Iterable[MapKeyInfo] | None = None,
+        description: str | None = None,
     ) -> None:
         if map_key_infos is None and df is not None:
             raise ValueError("map_key_infos may be `None` iff `df` is None.")
@@ -147,23 +158,23 @@ class MapData(Data):
 
     @property
     # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-    def map_key_infos(self) -> List[MapKeyInfo]:
+    def map_key_infos(self) -> list[MapKeyInfo]:
         return self._map_key_infos
 
     @property
-    def map_keys(self) -> List[str]:
+    def map_keys(self) -> list[str]:
         return [mki.key for mki in self.map_key_infos]
 
     @property
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    def map_key_to_type(self) -> Dict[str, Type]:
+    def map_key_to_type(self) -> dict[str, type]:
         return {mki.key: mki.value_type for mki in self.map_key_infos}
 
     @staticmethod
     def from_multiple_map_data(
         data: Sequence[MapData],
-        subset_metrics: Optional[Iterable[str]] = None,
+        subset_metrics: Iterable[str] | None = None,
     ) -> MapData:
         if len(data) == 0:
             return MapData()
@@ -194,10 +205,10 @@ class MapData(Data):
 
     @staticmethod
     def from_map_evaluations(
-        evaluations: Dict[str, TMapTrialEvaluation],
+        evaluations: dict[str, TMapTrialEvaluation],
         trial_index: int,
         # pyre-fixme[24]: Generic type `MapKeyInfo` expects 1 type parameter.
-        map_key_infos: Optional[Iterable[MapKeyInfo]] = None,
+        map_key_infos: Iterable[MapKeyInfo] | None = None,
     ) -> MapData:
         records = [
             {
@@ -242,16 +253,18 @@ class MapData(Data):
     @staticmethod
     def from_multiple_data(
         data: Iterable[Data],
-        subset_metrics: Optional[Iterable[str]] = None,
+        subset_metrics: Iterable[str] | None = None,
     ) -> MapData:
         """Downcast instances of Data into instances of MapData with empty
         map_key_infos if necessary then combine as usual (filling in empty cells with
         default values).
         """
         map_datas = [
-            MapData(df=datum.df, map_key_infos=[])
-            if not isinstance(datum, MapData)
-            else datum
+            (
+                MapData(df=datum.df, map_key_infos=[])
+                if not isinstance(datum, MapData)
+                else datum
+            )
             for datum in data
         ]
 
@@ -267,13 +280,11 @@ class MapData(Data):
         if self._memo_df is not None:
             return self._memo_df
 
-        if not any(True for _ in self.map_keys):
+        if len(self.map_keys) == 0:
             return self.map_df
 
-        self._memo_df = (
-            self.map_df.sort_values(list(self.map_keys))
-            .drop_duplicates(MapData.DEDUPLICATE_BY_COLUMNS, keep="last")
-            .loc[:, ~self.map_df.columns.isin(self.map_keys)]
+        self._memo_df = self.map_df.sort_values(self.map_keys).drop_duplicates(
+            MapData.DEDUPLICATE_BY_COLUMNS, keep="last"
         )
 
         return self._memo_df
@@ -281,10 +292,9 @@ class MapData(Data):
     @copy_doc(Data.filter)
     def filter(
         self,
-        trial_indices: Optional[Iterable[int]] = None,
-        metric_names: Optional[Iterable[str]] = None,
+        trial_indices: Iterable[int] | None = None,
+        metric_names: Iterable[str] | None = None,
     ) -> MapData:
-
         return MapData(
             df=self._filter_df(
                 df=self.map_df, trial_indices=trial_indices, metric_names=metric_names
@@ -294,7 +304,7 @@ class MapData(Data):
 
     @classmethod
     # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-    def serialize_init_args(cls, obj: Any) -> Dict[str, Any]:
+    def serialize_init_args(cls, obj: Any) -> dict[str, Any]:
         map_data = checked_cast(MapData, obj)
         properties = serialize_init_args(obj=map_data)
         properties["df"] = map_data.map_df
@@ -304,7 +314,12 @@ class MapData(Data):
         return properties
 
     @classmethod
-    def deserialize_init_args(cls, args: Dict[str, Any]) -> Dict[str, Any]:
+    def deserialize_init_args(
+        cls,
+        args: dict[str, Any],
+        decoder_registry: TDecoderRegistry | None = None,
+        class_decoder_registry: TClassDecoderRegistry | None = None,
+    ) -> dict[str, Any]:
         """Given a dictionary, extract the properties needed to initialize the metric.
         Used for storage.
         """
@@ -313,12 +328,22 @@ class MapData(Data):
         ]
         return super().deserialize_init_args(args=args)
 
+    def clone(self) -> MapData:
+        """Returns a new ``MapData`` object with the same underlying dataframe
+        and map key infos.
+        """
+        return MapData(
+            df=deepcopy(self.map_df),
+            map_key_infos=[mki.clone() for mki in self.map_key_infos],
+            description=self.description,
+        )
+
     def subsample(
         self,
-        map_key: Optional[str] = None,
-        keep_every: Optional[int] = None,
-        limit_rows_per_group: Optional[int] = None,
-        limit_rows_per_metric: Optional[int] = None,
+        map_key: str | None = None,
+        keep_every: int | None = None,
+        limit_rows_per_group: int | None = None,
+        limit_rows_per_metric: int | None = None,
         include_first_last: bool = True,
     ) -> MapData:
         """Subsample the `map_key` column in an equally-spaced manner (if there is
@@ -389,10 +414,10 @@ class MapData(Data):
 
 def _subsample_one_metric(
     map_df: pd.DataFrame,
-    map_key: Optional[str] = None,
-    keep_every: Optional[int] = None,
-    limit_rows_per_group: Optional[int] = None,
-    limit_rows_per_metric: Optional[int] = None,
+    map_key: str | None = None,
+    keep_every: int | None = None,
+    limit_rows_per_group: int | None = None,
+    limit_rows_per_metric: int | None = None,
     include_first_last: bool = True,
 ) -> pd.DataFrame:
     """Helper function to subsample a dataframe that holds a single metric."""

@@ -4,7 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, List, Sequence, Union
+# pyre-strict
+
+import logging
+from collections.abc import Sequence
+
+import numpy as np
 
 from ax.core.types import TParamValue
 from ax.service.ax_client import AxClient, ObjectiveProperties
@@ -47,8 +52,8 @@ class TestAxClient(TestCase):
 
         # Test with HSS & MOO.
         ax_client = AxClient()
-        parameters: List[
-            Dict[str, Union[TParamValue, Sequence[TParamValue], Dict[str, List[str]]]]
+        parameters: list[
+            dict[str, TParamValue | Sequence[TParamValue] | dict[str, list[str]]]
         ] = [
             {
                 "name": "SearchSpace.optimizer",
@@ -118,10 +123,51 @@ class TestAxClient(TestCase):
             experiment_completed_record=ExperimentCompletedRecord.from_experiment(
                 experiment=ax_client.experiment
             ),
-            best_point_quality=float("-inf"),
-            model_fit_quality=float("-inf"),
-            model_std_quality=float("-inf"),
-            model_fit_generalization=float("-inf"),
-            model_std_generalization=float("-inf"),
+            best_point_quality=float("nan"),
+            model_fit_quality=float("nan"),
+            model_std_quality=float("nan"),
+            model_fit_generalization=float("nan"),
+            model_std_generalization=float("nan"),
         )
-        self.assertEqual(record, expected)
+        self._compare_axclient_completed_records(record, expected)
+
+    def test_batch_trial_warning(self) -> None:
+        ax_client = AxClient()
+        warning_msg = "GenerationStrategy when using BatchTrials is in beta."
+        with self.assertLogs(AxClient.__module__, logging.WARNING) as logger:
+            ax_client.create_experiment(
+                name="test_experiment",
+                parameters=[
+                    {"name": "x", "type": "range", "bounds": [-5.0, 10.0]},
+                ],
+                objectives={"branin": ObjectiveProperties(minimize=True)},
+                is_test=True,
+                choose_generation_strategy_kwargs={
+                    "use_batch_trials": True,
+                },
+            )
+            self.assertTrue(
+                any(warning_msg in output for output in logger.output),
+                logger.output,
+            )
+
+    def _compare_axclient_completed_records(
+        self, record: AxClientCompletedRecord, expected: AxClientCompletedRecord
+    ) -> None:
+        self.assertEqual(
+            record.experiment_completed_record, expected.experiment_completed_record
+        )
+        numeric_fields = [
+            "best_point_quality",
+            "model_fit_quality",
+            "model_std_quality",
+            "model_fit_generalization",
+            "model_std_generalization",
+        ]
+        for field in numeric_fields:
+            rec_field = getattr(record, field)
+            exp_field = getattr(expected, field)
+            if np.isnan(rec_field):
+                self.assertTrue(np.isnan(exp_field))
+            else:
+                self.assertAlmostEqual(rec_field, exp_field)

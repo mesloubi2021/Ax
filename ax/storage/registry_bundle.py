@@ -3,10 +3,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from abc import ABC, abstractproperty
-from typing import Any, Callable, ChainMap, Dict, Optional, Type
+from collections import ChainMap
+from collections.abc import Callable
+from typing import Any
 
 from ax.core.metric import Metric
 from ax.core.runner import Runner
@@ -15,6 +19,7 @@ from ax.storage.json_store.registry import (
     CORE_CLASS_ENCODER_REGISTRY,
     CORE_DECODER_REGISTRY,
     CORE_ENCODER_REGISTRY,
+    TDecoderRegistry,
 )
 from ax.storage.metric_registry import register_metrics
 from ax.storage.runner_registry import register_runners
@@ -49,21 +54,19 @@ class RegistryBundleBase(ABC):
 
     def __init__(
         self,
-        metric_clss: Dict[Type[Metric], Optional[int]],
-        runner_clss: Dict[Type[Runner], Optional[int]],
+        metric_clss: dict[type[Metric], int | None],
+        runner_clss: dict[type[Runner], int | None],
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        json_encoder_registry: Dict[Type, Callable[[Any], Dict[str, Any]]],
+        json_encoder_registry: dict[type, Callable[[Any], dict[str, Any]]],
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        json_class_encoder_registry: Dict[Type, Callable[[Any], Dict[str, Any]]],
-        # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
-        #  `typing.Type` to avoid runtime subscripting errors.
-        json_decoder_registry: Dict[str, Type],
+        json_class_encoder_registry: dict[type, Callable[[Any], dict[str, Any]]],
+        json_decoder_registry: TDecoderRegistry,
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-        json_class_decoder_registry: Dict[str, Callable[[Dict[str, Any]], Any]],
+        json_class_decoder_registry: dict[str, Callable[[dict[str, Any]], Any]],
     ) -> None:
         # pyre-fixme[4]: Attribute must be annotated.
         self._metric_registry, encoder_registry, decoder_registry = register_metrics(
@@ -88,36 +91,34 @@ class RegistryBundleBase(ABC):
         self._json_class_decoder_registry = json_class_decoder_registry
 
     @property
-    def metric_registry(self) -> Dict[Type[Metric], int]:
+    def metric_registry(self) -> dict[type[Metric], int]:
         return self._metric_registry
 
     @property
-    def runner_registry(self) -> Dict[Type[Runner], int]:
+    def runner_registry(self) -> dict[type[Runner], int]:
         return self._runner_registry
 
     @property
     # pyre-fixme[3]: Return annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    def encoder_registry(self) -> Dict[Type, Callable[[Any], Dict[str, Any]]]:
+    def encoder_registry(self) -> dict[type, Callable[[Any], dict[str, Any]]]:
         return self._encoder_registry
 
     @property
-    # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
-    #  `typing.Type` to avoid runtime subscripting errors.
-    def decoder_registry(self) -> Dict[str, Type]:
+    def decoder_registry(self) -> TDecoderRegistry:
         return self._decoder_registry
 
     @property
     # pyre-fixme[3]: Return annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    def class_encoder_registry(self) -> Dict[Type, Callable[[Any], Dict[str, Any]]]:
+    def class_encoder_registry(self) -> dict[type, Callable[[Any], dict[str, Any]]]:
         return self._json_class_encoder_registry
 
     @property
     # pyre-fixme[3]: Return annotation cannot contain `Any`.
-    def class_decoder_registry(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+    def class_decoder_registry(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return self._json_class_decoder_registry
 
     @abstractproperty
@@ -140,21 +141,17 @@ class RegistryBundleBase(ABC):
             metric_clss={},
             runner_clss={},
             json_encoder_registry=dict(
-                # pyre-ignore[29] `typing._Alias` is not a function.
                 ChainMap(*[bundle.encoder_registry for bundle in registry_bundles])
             ),
             json_class_encoder_registry=dict(
-                # pyre-ignore[29] `typing._Alias` is not a function.
                 ChainMap(
                     *[bundle.class_encoder_registry for bundle in registry_bundles]
                 )
             ),
             json_decoder_registry=dict(
-                # pyre-ignore[29] `typing._Alias` is not a function.
                 ChainMap(*[bundle.decoder_registry for bundle in registry_bundles])
             ),
             json_class_decoder_registry=dict(
-                # pyre-ignore[29] `typing._Alias` is not a function.
                 ChainMap(
                     *[bundle.class_decoder_registry for bundle in registry_bundles]
                 )
@@ -167,26 +164,24 @@ class RegistryBundle(RegistryBundleBase):
 
     def __init__(
         self,
-        metric_clss: Dict[Type[Metric], Optional[int]],
-        runner_clss: Dict[Type[Runner], Optional[int]],
+        metric_clss: dict[type[Metric], int | None],
+        runner_clss: dict[type[Runner], int | None],
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        json_encoder_registry: Dict[
-            Type, Callable[[Any], Dict[str, Any]]
+        json_encoder_registry: dict[
+            type, Callable[[Any], dict[str, Any]]
         ] = CORE_ENCODER_REGISTRY,
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        json_class_encoder_registry: Dict[
-            Type, Callable[[Any], Dict[str, Any]]
+        json_class_encoder_registry: dict[
+            type, Callable[[Any], dict[str, Any]]
         ] = CORE_CLASS_ENCODER_REGISTRY,
-        # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
-        #  `typing.Type` to avoid runtime subscripting errors.
-        json_decoder_registry: Dict[str, Type] = CORE_DECODER_REGISTRY,
+        json_decoder_registry: TDecoderRegistry = CORE_DECODER_REGISTRY,
         # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-        json_class_decoder_registry: Dict[
-            str, Callable[[Dict[str, Any]], Any]
+        json_class_decoder_registry: dict[
+            str, Callable[[dict[str, Any]], Any]
         ] = CORE_CLASS_DECODER_REGISTRY,
     ) -> None:
         super().__init__(

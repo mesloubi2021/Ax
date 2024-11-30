@@ -4,22 +4,27 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import warnings
-from contextlib import contextmanager
+from collections import OrderedDict
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from logging import Logger
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
-from ax.exceptions.core import AxWarning, UnsupportedError
+from ax.exceptions.core import AxError, AxWarning, UnsupportedError
+from ax.models.torch_base import TorchOptConfig
 from ax.models.types import TConfig
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.acquisition.logei import qLogNoisyExpectedImprovement
-from botorch.acquisition.multi_objective.monte_carlo import (
-    qNoisyExpectedHypervolumeImprovement,
+from botorch.acquisition.multi_objective.logei import (
+    qLogNoisyExpectedHypervolumeImprovement,
 )
 from botorch.fit import fit_fully_bayesian_model_nuts, fit_gpytorch_mll
 from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
@@ -30,46 +35,146 @@ from botorch.models.gpytorch import BatchedMultiOutputGPyTorchModel, GPyTorchMod
 from botorch.models.model import Model, ModelList
 from botorch.models.multitask import MultiTaskGP
 from botorch.models.pairwise_gp import PairwiseGP
-from botorch.models.transforms.input import ChainedInputTransform
+from botorch.models.transforms.input import InputTransform
+from botorch.models.transforms.outcome import OutcomeTransform
 from botorch.utils.datasets import SupervisedDataset
 from botorch.utils.transforms import is_fully_bayesian
+from gpytorch.kernels.kernel import Kernel
+from gpytorch.likelihoods import Likelihood
+from gpytorch.mlls.exact_marginal_log_likelihood import ExactMarginalLogLikelihood
 from gpytorch.mlls.marginal_log_likelihood import MarginalLogLikelihood
+from pyre_extensions import none_throws
 from torch import Tensor
 
 MIN_OBSERVED_NOISE_LEVEL = 1e-7
 logger: Logger = get_logger(__name__)
 
 
+@dataclass
+class ModelConfig:
+    """Configuration for the BoTorch Model used in Surrogate.
+
+    Args:
+        botorch_model_class: ``Model`` class to be used as the underlying
+            BoTorch model. If None is provided a model class will be selected (either
+            one for all outcomes or a ModelList with separate models for each outcome)
+            will be selected automatically based off the datasets at `construct` time.
+        model_options: Dictionary of options / kwargs for the BoTorch
+            ``Model`` constructed during ``Surrogate.fit``.
+            Note that the corresponding attribute will later be updated to include any
+            additional kwargs passed into ``BoTorchModel.fit``.
+        mll_class: ``MarginalLogLikelihood`` class to use for model-fitting.
+            This argument is deprecated in favor of model_configs.
+        mll_options: Dictionary of options / kwargs for the MLL.
+        outcome_transform_classes: List of BoTorch outcome transforms classes. Passed
+            down to the BoTorch ``Model``. Multiple outcome transforms can be chained
+            together using ``ChainedOutcomeTransform``.
+        outcome_transform_options: Outcome transform classes kwargs. The keys are
+            class string names and the values are dictionaries of outcome transform
+            kwargs. For example,
+            `
+            outcome_transform_classes = [Standardize]
+            outcome_transform_options = {
+                "Standardize": {"m": 1},
+            `
+            For more options see `botorch/models/transforms/outcome.py`.
+        input_transform_classes: List of BoTorch input transforms classes.
+            Passed down to the BoTorch ``Model``. Multiple input transforms
+            will be chained together using ``ChainedInputTransform``.
+        input_transform_options: Input transform classes kwargs. The keys are
+            class string names and the values are dictionaries of input transform
+            kwargs. For example,
+            `
+            input_transform_classes = [Normalize, Round]
+            input_transform_options = {
+                "Normalize": {"d": 3},
+                "Round": {"integer_indices": [0], "categorical_features": {1: 2}},
+            }
+            `
+            For more input options see `botorch/models/transforms/input.py`.
+        covar_module_class: Covariance module class. This gets initialized after
+            parsing the ``covar_module_options`` in ``covar_module_argparse``,
+            and gets passed to the model constructor as ``covar_module``.
+        covar_module_options: Covariance module kwargs.
+            in favor of model_configs.
+        likelihood: ``Likelihood`` class. This gets initialized with
+            ``likelihood_options`` and gets passed to the model constructor.
+            This argument is deprecated in favor of model_configs.
+        likelihood_options: Likelihood options.
+        name: Name of the model config. This is used to identify the model config.
+    """
+
+    botorch_model_class: type[Model] | None = None
+    model_options: dict[str, Any] = field(default_factory=dict)
+    mll_class: type[MarginalLogLikelihood] = ExactMarginalLogLikelihood
+    mll_options: dict[str, Any] = field(default_factory=dict)
+    input_transform_classes: list[type[InputTransform]] | None = None
+    input_transform_options: dict[str, dict[str, Any]] | None = field(
+        default_factory=dict
+    )
+    outcome_transform_classes: list[type[OutcomeTransform]] | None = None
+    outcome_transform_options: dict[str, dict[str, Any]] = field(default_factory=dict)
+    covar_module_class: type[Kernel] | None = None
+    covar_module_options: dict[str, Any] = field(default_factory=dict)
+    likelihood_class: type[Likelihood] | None = None
+    likelihood_options: dict[str, Any] = field(default_factory=dict)
+    name: str | None = None
+
+
 def use_model_list(
-    datasets: List[SupervisedDataset],
-    botorch_model_class: Type[Model],
+    datasets: Sequence[SupervisedDataset],
+    botorch_model_class: type[Model],
+    model_configs: list[ModelConfig] | None = None,
+    metric_to_model_configs: dict[str, list[ModelConfig]] | None = None,
     allow_batched_models: bool = True,
 ) -> bool:
-
-    if issubclass(botorch_model_class, MultiTaskGP):
-        # We currently always wrap multi-task models into `ModelListGP`.
+    model_configs = model_configs or []
+    metric_to_model_configs = metric_to_model_configs or {}
+    if len(datasets) == 1 and datasets[0].Y.shape[-1] == 1:
+        # There is only one outcome, so we can use a single model.
+        return False
+    elif (
+        len(model_configs) > 1
+        or len(metric_to_model_configs) > 0
+        or any(len(model_config) for model_config in metric_to_model_configs.values())
+    ):
+        # There are multiple outcomes and outcomes might be modeled with different
+        # models
         return True
-    elif issubclass(botorch_model_class, SaasFullyBayesianSingleTaskGP):
+    # Otherwise, the same model class is used for all outcomes.
+    # Determine what the model class is.
+    if len(model_configs) > 0:
+        botorch_model_class = (
+            model_configs[0].botorch_model_class or botorch_model_class
+        )
+    if issubclass(botorch_model_class, SaasFullyBayesianSingleTaskGP):
         # SAAS models do not support multiple outcomes.
         # Use model list if there are multiple outcomes.
         return len(datasets) > 1 or datasets[0].Y.shape[-1] > 1
+    elif issubclass(botorch_model_class, MultiTaskGP):
+        # We wrap multi-task models into `ModelListGP` when there are
+        # multiple outcomes.
+        return len(datasets) > 1 or datasets[0].Y.shape[-1] > 1
     elif len(datasets) == 1:
-        # Just one outcome, can use single model.
+        # This method is called before multiple datasets are merged into
+        # one if using a batched model. If there is one dataset here,
+        # there should be a reason that a single model should be used:
+        # e.g. a contextual model, where we want to jointly model the metric
+        # each context (and context-level metrics are different outcomes).
         return False
     elif issubclass(botorch_model_class, BatchedMultiOutputGPyTorchModel) and all(
         torch.equal(datasets[0].X, ds.X) for ds in datasets[1:]
     ):
         # Use batch models if allowed
         return not allow_batched_models
-    # If there are multiple Xs and they are not all equal, we
-    # use `ListSurrogate` and `ModelListGP`.
+    # If there are multiple Xs and they are not all equal, we use `ModelListGP`.
     return True
 
 
 def choose_model_class(
-    datasets: List[SupervisedDataset],
+    datasets: Sequence[SupervisedDataset],
     search_space_digest: SearchSpaceDigest,
-) -> Type[Model]:
+) -> type[Model]:
     """Chooses a BoTorch `Model` using the given data (currently just Yvars)
     and its properties (information about task and fidelity features).
 
@@ -129,22 +234,15 @@ def choose_model_class(
 
 
 def choose_botorch_acqf_class(
-    pending_observations: Optional[List[Tensor]] = None,
-    outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    linear_constraints: Optional[Tuple[Tensor, Tensor]] = None,
-    fixed_features: Optional[Dict[int, float]] = None,
-    objective_thresholds: Optional[Tensor] = None,
-    objective_weights: Optional[Tensor] = None,
-) -> Type[AcquisitionFunction]:
-    """Chooses a BoTorch `AcquisitionFunction` class."""
-    if objective_thresholds is not None or (
-        # using objective_weights is a less-than-ideal fix given its ambiguity,
-        # the real fix would be to revisit the infomration passed down via
-        # the modelbridge (and be explicit about whether we scalarize or perform MOO)
-        objective_weights is not None
-        and objective_weights.nonzero().numel() > 1
-    ):
-        acqf_class = qNoisyExpectedHypervolumeImprovement
+    torch_opt_config: TorchOptConfig,
+) -> type[AcquisitionFunction]:
+    """Chooses a BoTorch ``AcquisitionFunction`` class.
+
+    Current logic relies on ``TorchOptConfig.is_moo`` field to determine
+    whether to use qLogNEHVI (for MOO) or qLogNEI for (SOO).
+    """
+    if torch_opt_config.is_moo:
+        acqf_class = qLogNoisyExpectedHypervolumeImprovement
     else:
         acqf_class = qLogNoisyExpectedImprovement
 
@@ -153,8 +251,8 @@ def choose_botorch_acqf_class(
 
 
 def construct_acquisition_and_optimizer_options(
-    acqf_options: TConfig, model_gen_options: Optional[TConfig] = None
-) -> Tuple[TConfig, TConfig]:
+    acqf_options: TConfig, model_gen_options: TConfig | None = None
+) -> tuple[TConfig, TConfig]:
     """Extract acquisition and optimizer options from `model_gen_options`."""
     acq_options = acqf_options.copy()
     opt_options = {}
@@ -173,10 +271,9 @@ def construct_acquisition_and_optimizer_options(
 
 
 def convert_to_block_design(
-    datasets: List[SupervisedDataset],
-    metric_names: List[str],
+    datasets: Sequence[SupervisedDataset],
     force: bool = False,
-) -> Tuple[List[SupervisedDataset], List[str]]:
+) -> list[SupervisedDataset]:
     # Convert data to "block design". TODO: Figure out a better
     # solution for this using the data containers (pass outcome
     # names as properties of the data containers)
@@ -184,17 +281,19 @@ def convert_to_block_design(
     if any(is_fixed) and not all(is_fixed):
         raise UnsupportedError(
             "Cannot convert mixed data with and without variance "
-            "observaitons to `block design`."
+            "observations to `block design`."
         )
     is_fixed = all(is_fixed)
     Xs = [dataset.X for dataset in datasets]
-    joined_metric_names = ["_".join(metric_names)]  # TODO: Improve this.
     for dset in datasets[1:]:
         if dset.feature_names != datasets[0].feature_names:
             raise ValueError(
                 "Feature names must be the same across all datasets, "
                 f"got {dset.feature_names} and {datasets[0].feature_names}"
             )
+
+    # Join the outcome names of datasets.
+    outcome_names = sum([ds.outcome_names for ds in datasets], [])
 
     if len({X.shape for X in Xs}) != 1 or not all(
         torch.equal(X, Xs[0]) for X in Xs[1:]
@@ -206,15 +305,17 @@ def convert_to_block_design(
                 "outcomes use `force=True`."
             )
         warnings.warn(
-            "Forcing converion of data not complying to a block design "
+            "Forcing conversion of data not complying to a block design "
             "to block design by dropping observations that are not shared "
             "between outcomes.",
             AxWarning,
+            stacklevel=3,
         )
         X_shared, idcs_shared = _get_shared_rows(Xs=Xs)
         Y = torch.cat([ds.Y[i] for ds, i in zip(datasets, idcs_shared)], dim=-1)
         if is_fixed:
             Yvar = torch.cat(
+                # pyre-fixme[16]: `Optional` has no attribute `__getitem__`.
                 [ds.Yvar[i] for ds, i in zip(datasets, idcs_shared)],
                 dim=-1,
             )
@@ -226,15 +327,15 @@ def convert_to_block_design(
                 Y=Y,
                 Yvar=Yvar,
                 feature_names=datasets[0].feature_names,
-                outcome_names=metric_names,
+                outcome_names=outcome_names,
             )
         ]
-        return datasets, joined_metric_names
+        return datasets
 
     # data complies to block design, can concat with impunity
     Y = torch.cat([ds.Y for ds in datasets], dim=-1)
     if is_fixed:
-        Yvar = torch.cat([not_none(ds.Yvar) for ds in datasets], dim=-1)
+        Yvar = torch.cat([none_throws(ds.Yvar) for ds in datasets], dim=-1)
     else:
         Yvar = None
     datasets = [
@@ -243,13 +344,13 @@ def convert_to_block_design(
             Y=Y,
             Yvar=Yvar,
             feature_names=datasets[0].feature_names,
-            outcome_names=metric_names,
+            outcome_names=outcome_names,
         )
     ]
-    return datasets, joined_metric_names
+    return datasets
 
 
-def _get_shared_rows(Xs: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
+def _get_shared_rows(Xs: list[Tensor]) -> tuple[Tensor, list[Tensor]]:
     """Extract shared rows from a list of tensors
 
     Args:
@@ -277,8 +378,8 @@ def _get_shared_rows(Xs: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
 
 def fit_botorch_model(
     model: Model,
-    mll_class: Type[MarginalLogLikelihood],
-    mll_options: Optional[Dict[str, Any]] = None,
+    mll_class: type[MarginalLogLikelihood],
+    mll_options: dict[str, Any] | None = None,
 ) -> None:
     """Fit a BoTorch model."""
     mll_options = mll_options or {}
@@ -301,37 +402,6 @@ def fit_botorch_model(
             )
 
 
-@contextmanager
-def disable_one_to_many_transforms(model: Model) -> Generator[None, None, None]:
-    r"""A context manager for temporarily disabling one-to-many transforms.
-
-    This can be used to avoid perturbing the user supplied inputs when
-    getting the predictions from the model.
-
-    NOTE: This currently does not support chained input transforms.
-
-    Args:
-        model: The BoTorch `Model` to disable the transforms for.
-    """
-    models = model.models if isinstance(model, ModelList) else [model]
-    input_transforms = [getattr(m, "input_transform", None) for m in models]
-    try:
-        for intf in input_transforms:
-            if intf is None:
-                continue
-            if isinstance(intf, ChainedInputTransform):
-                raise UnsupportedError(
-                    "ChainedInputTransforms are currently not supported."
-                )
-            if intf.is_one_to_many:
-                intf.transform_on_eval = False
-        yield
-    finally:
-        for intf in input_transforms:
-            if intf is not None and intf.is_one_to_many:
-                intf.transform_on_eval = True
-
-
 def _tensor_difference(A: Tensor, B: Tensor) -> Tensor:
     """Used to return B sans any Xs that also appear in A"""
     C = torch.cat((A, B), dim=0)
@@ -343,33 +413,119 @@ def _tensor_difference(A: Tensor, B: Tensor) -> Tensor:
     return D[list(Bi_set)]
 
 
-def get_post_processing_func(
-    rounding_func: Optional[Callable[[Tensor], Tensor]],
-    optimizer_options: Dict[str, Any],
-) -> Optional[Callable[[Tensor], Tensor]]:
-    """Get the post processing function by combining the rounding function
-    with the post processing function provided as part of the optimizer
-    options. If both are given, the post processing function is applied before
-    applying the rounding function. If only one of them is given, then
-    it is used as the post processing function.
+def check_outcome_dataset_match(
+    outcome_names: Sequence[str],
+    datasets: Sequence[SupervisedDataset],
+    exact_match: bool,
+) -> None:
+    """Check that the given outcome names match those of datasets.
+
+    Based on `exact_match` we either require that outcome names are
+    a subset of all outcomes or require the them to be the same.
+
+    Also checks that there are no duplicates in outcome names.
+
+    Args:
+        outcome_names: A list of outcome names.
+        datasets: A list of `SupervisedDataset` objects.
+        exact_match: If True, outcome_names must be the same as the union of
+            outcome names of the datasets. Otherwise, we check that the
+            outcome_names are a subset of all outcomes.
+
+    Raises:
+        ValueError: If there is no match.
     """
-    if "post_processing_func" in optimizer_options:
-        provided_func: Callable[[Tensor], Tensor] = optimizer_options.pop(
-            "post_processing_func"
+    all_outcomes = sum((ds.outcome_names for ds in datasets), [])
+    set_all_outcomes = set(all_outcomes)
+    set_all_spec_outcomes = set(outcome_names)
+    if len(set_all_outcomes) != len(all_outcomes):
+        raise AxError("Found duplicate outcomes in the datasets.")
+    if len(set_all_spec_outcomes) != len(outcome_names):
+        raise AxError("Found duplicate outcome names.")
+
+    if not exact_match:
+        if not set_all_spec_outcomes.issubset(set_all_outcomes):
+            raise AxError(
+                "Outcome names must be a subset of the outcome names of the datasets."
+                f"Got {outcome_names=} but the datasets model {set_all_outcomes}."
+            )
+    elif set_all_spec_outcomes != set_all_outcomes:
+        raise AxError(
+            "Each outcome name must correspond to an outcome in the datasets. "
+            f"Got {outcome_names=} but the datasets model {set_all_outcomes}."
         )
-        if rounding_func is None:
-            # No rounding function is given. We can use the post processing
-            # function directly.
-            return provided_func
+
+
+def get_subset_datasets(
+    datasets: Sequence[SupervisedDataset],
+    subset_outcome_names: Sequence[str],
+) -> list[SupervisedDataset]:
+    """Get the list of datasets corresponding to the given subset of
+    outcome names. This is used to separate out datasets that are
+    used by one surrogate.
+
+    Args:
+        datasets: A list of `SupervisedDataset` objects.
+        subset_outcome_names: A list of outcome names to get datasets for.
+
+    Returns:
+        A list of `SupervisedDataset` objects corresponding to the given
+        subset of outcome names.
+    """
+    check_outcome_dataset_match(
+        outcome_names=subset_outcome_names, datasets=datasets, exact_match=False
+    )
+    single_outcome_datasets = {
+        ds.outcome_names[0]: ds for ds in datasets if len(ds.outcome_names) == 1
+    }
+    multi_outcome_datasets = {
+        tuple(ds.outcome_names): ds for ds in datasets if len(ds.outcome_names) > 1
+    }
+    subset_datasets = []
+    outcomes_processed = []
+    for outcome_name in subset_outcome_names:
+        if outcome_name in outcomes_processed:
+            # This can happen if the outcome appears in a multi-outcome
+            # dataset that is already processed.
+            continue
+        if outcome_name in single_outcome_datasets:
+            # The default case of outcome with a corresponding dataset.
+            ds = single_outcome_datasets[outcome_name]
         else:
-            # Both post processing and rounding functions are given. We need
-            # to chain them and apply the post processing function first.
-            base_rounding_func: Callable[[Tensor], Tensor] = rounding_func
+            # The case of outcome being part of a multi-outcome dataset.
+            for outcome_names in multi_outcome_datasets.keys():
+                if outcome_name in outcome_names:
+                    ds = multi_outcome_datasets[outcome_names]
+                    if not set(ds.outcome_names).issubset(subset_outcome_names):
+                        raise UnsupportedError(
+                            "Breaking up a multi-outcome dataset between "
+                            "surrogates is not supported."
+                        )
+                    break
+        # Pyre-ignore [61]: `ds` may not be defined but it is guaranteed to be defined.
+        subset_datasets.append(ds)
+        outcomes_processed.extend(ds.outcome_names)
+    return subset_datasets
 
-            def combined_func(x: Tensor) -> Tensor:
-                return base_rounding_func(provided_func(x))
 
-            return combined_func
+def subset_state_dict(
+    state_dict: OrderedDict[str, Tensor],
+    submodel_index: int,
+) -> OrderedDict[str, Tensor]:
+    """Get the state dict for a submodel from the state dict of a model list.
 
-    else:
-        return rounding_func
+    Args:
+        state_dict: A state dict.
+        submodel_index: The index of the submodel to extract.
+
+    Returns:
+        The state dict for the submodel.
+    """
+    expected_substring = f"models.{submodel_index}."
+    len_substring = len(expected_substring)
+    new_items = [
+        (k[len_substring:], v)
+        for k, v in state_dict.items()
+        if k.startswith(expected_substring)
+    ]
+    return OrderedDict(new_items)

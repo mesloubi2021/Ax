@@ -4,15 +4,19 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import random
 import string
-from typing import Tuple
 from unittest.mock import patch
 
 from ax.core.base_trial import TrialStatus
 from ax.core.experiment import Experiment
 from ax.modelbridge.generation_strategy import GenerationStrategy
-from ax.service.utils.with_db_settings_base import WithDBSettingsBase
+from ax.service.utils.with_db_settings_base import (
+    try_load_generation_strategy,
+    WithDBSettingsBase,
+)
 from ax.storage.sqa_store.db import init_test_engine_and_session_factory
 from ax.storage.sqa_store.load import (
     _load_experiment,
@@ -26,7 +30,11 @@ from ax.storage.sqa_store.save import (
 )
 from ax.storage.sqa_store.structs import DBSettings
 from ax.utils.common.testutils import TestCase
-from ax.utils.testing.core_stubs import get_experiment, get_generator_run
+from ax.utils.testing.core_stubs import (
+    get_experiment,
+    get_generator_run,
+    SpecialGenerationStrategy,
+)
 from ax.utils.testing.modeling_stubs import get_generation_strategy
 
 
@@ -70,7 +78,7 @@ class TestWithDBSettingsBase(TestCase):
 
     def init_experiment_and_generation_strategy(
         self, save_experiment: bool = True, save_generation_strategy: bool = True
-    ) -> Tuple[Experiment, GenerationStrategy]:
+    ) -> tuple[Experiment, GenerationStrategy]:
         """Generate a random Experiment and associated generation_strategy"""
 
         generation_strategy = self.get_random_generation_strategy()
@@ -92,7 +100,6 @@ class TestWithDBSettingsBase(TestCase):
         return experiment, generation_strategy
 
     def test_get_experiment_and_generation_strategy_db_id(self) -> None:
-
         (
             exp_id,
             gen_id,
@@ -126,6 +133,13 @@ class TestWithDBSettingsBase(TestCase):
         )
         self.assertIsNotNone(loaded_gs)
         self.assertEqual(loaded_gs.name, generation_strategy.name)
+
+    def test_save_non_standard_generation_strategy(self) -> None:
+        generation_strategy = SpecialGenerationStrategy()
+        saved = self.with_db_settings._save_generation_strategy_to_db_if_possible(
+            generation_strategy
+        )
+        self.assertFalse(saved)
 
     def test_save_load_experiment_and_generation_strategy(self) -> None:
         experiment, generation_strategy = self.init_experiment_and_generation_strategy(
@@ -168,6 +182,16 @@ class TestWithDBSettingsBase(TestCase):
         self.assertTrue(updated)
         self.assertIsNotNone(generator_run.db_id)
         self.assertIsNotNone(generator_run.arms[0].db_id)
+
+    def test_update_non_standard_generation_strategy(self) -> None:
+        generation_strategy = SpecialGenerationStrategy()
+        generator_run = get_generator_run()
+        saved = self.with_db_settings._update_generation_strategy_in_db_if_possible(
+            generation_strategy, [generator_run]
+        )
+        self.assertFalse(saved)
+        self.assertIsNone(generator_run.db_id)
+        self.assertIsNone(generator_run.arms[0].db_id)
 
     @patch(f"{WithDBSettingsBase.__module__}.STORAGE_MINI_BATCH_SIZE", 2)
     def test_update_generation_strategy_mini_batches(self) -> None:
@@ -347,3 +371,40 @@ class TestWithDBSettingsBase(TestCase):
             experiment.name, decoder=self.with_db_settings.db_settings.decoder
         )
         self.assertEqual(loaded_experiment._properties, {"test_property": True})
+
+    def test_try_load_generation_strategy(self) -> None:
+        experiment, generation_strategy = self.init_experiment_and_generation_strategy(
+            save_generation_strategy=False
+        )
+        # test logging with no experiment/gs saved
+        with self.assertLogs(logger="ax.service.utils.with_db_settings_base") as lg:
+            output = try_load_generation_strategy(
+                experiment_name=experiment.name,
+                decoder=self.with_db_settings.db_settings.decoder,
+                experiment=experiment,
+            )
+            self.assertIn(
+                "There is no generation strategy associated with experiment",
+                lg.output[0],
+            )
+        self.assertIsNone(output)
+        # test with saved experiment/gs
+        (
+            exp_saved,
+            gs_saved,
+        ) = self.with_db_settings._maybe_save_experiment_and_generation_strategy(
+            experiment, generation_strategy
+        )
+        self.assertTrue(exp_saved)
+        self.assertTrue(gs_saved)
+        with self.assertLogs(logger="ax.service.utils.with_db_settings_base") as lg:
+            output = try_load_generation_strategy(
+                experiment_name=experiment.name,
+                decoder=self.with_db_settings.db_settings.decoder,
+                experiment=experiment,
+            )
+            self.assertIn(
+                "Loaded generation strategy for experiment",
+                lg.output[0],
+            )
+        self.assertEqual(output, generation_strategy)

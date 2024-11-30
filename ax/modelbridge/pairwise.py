@@ -4,9 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from __future__ import annotations
+# pyre-strict
 
-from typing import List, Optional, Tuple
+from __future__ import annotations
 
 import numpy as np
 import torch
@@ -14,8 +14,9 @@ from ax.core.observation import ObservationData, ObservationFeatures
 from ax.core.search_space import SearchSpaceDigest
 from ax.core.types import TCandidateMetadata
 from ax.modelbridge.torch import TorchModelBridge
+from ax.utils.common.constants import Keys
 from botorch.models.utils.assorted import consolidate_duplicates
-from botorch.utils.containers import SliceContainer
+from botorch.utils.containers import DenseContainer, SliceContainer
 from botorch.utils.datasets import RankingDataset, SupervisedDataset
 from torch import Tensor
 
@@ -23,19 +24,20 @@ from torch import Tensor
 class PairwiseModelBridge(TorchModelBridge):
     def _convert_observations(
         self,
-        observation_data: List[ObservationData],
-        observation_features: List[ObservationFeatures],
-        outcomes: List[str],
-        parameters: List[str],
-        search_space_digest: Optional[SearchSpaceDigest],
-    ) -> Tuple[
-        List[Optional[SupervisedDataset]], Optional[List[List[TCandidateMetadata]]]
+        observation_data: list[ObservationData],
+        observation_features: list[ObservationFeatures],
+        outcomes: list[str],
+        parameters: list[str],
+        search_space_digest: SearchSpaceDigest | None,
+    ) -> tuple[
+        list[SupervisedDataset], list[str], list[list[TCandidateMetadata]] | None
     ]:
         """Converts observations to a dictionary of `Dataset` containers and (optional)
         candidate metadata.
         """
         if len(observation_features) != len(observation_data):
             raise ValueError("Observation features and data must have the same length!")
+        # pyre-fixme[6]: For 1st argument expected `Union[_SupportsArray[dtype[typing...
         ordered_idx = np.argsort([od.trial_index for od in observation_features])
         observation_features = [observation_features[i] for i in ordered_idx]
         observation_data = [observation_data[i] for i in ordered_idx]
@@ -46,39 +48,71 @@ class PairwiseModelBridge(TorchModelBridge):
             Yvars,
             candidate_metadata_dict,
             any_candidate_metadata_is_not_none,
+            trial_indices,
         ) = self._extract_observation_data(
             observation_data, observation_features, parameters
         )
 
-        datasets: List[Optional[SupervisedDataset]] = []
+        datasets: list[SupervisedDataset] = []
         candidate_metadata = []
         for outcome in outcomes:
             X = torch.stack(Xs[outcome], dim=0)
             Y = torch.tensor(Ys[outcome], dtype=torch.long).unsqueeze(-1)
-
-            # Update Xs and Ys shapes for PairwiseGP
-            Y = _binary_pref_to_comp_pair(Y=Y)
-            X, Y = _consolidate_comparisons(X=X, Y=Y)
-
-            datapoints, comparisons = X, Y.long()
-            event_shape = torch.Size([2 * datapoints.shape[-1]])
-            # pyre-fixme[6]: For 2nd param expected `LongTensor` but got `Tensor`.
-            dataset_X = SliceContainer(datapoints, comparisons, event_shape=event_shape)
-            dataset_Y = torch.tensor([[0, 1]]).expand(comparisons.shape)
-            dataset = RankingDataset(
-                X=dataset_X,
-                Y=dataset_Y,
-                feature_names=parameters,
-                outcome_names=[outcome],
-            )
+            if outcome == Keys.PAIRWISE_PREFERENCE_QUERY.value:
+                dataset = _prep_pairwise_data(
+                    X=X, Y=Y, outcome=outcome, parameters=parameters
+                )
+            else:  # pragma: no cover
+                event_shape = torch.Size([X.shape[-1]])
+                dataset_X = DenseContainer(X, event_shape=event_shape)
+                dataset = SupervisedDataset(
+                    X=dataset_X,
+                    Y=Y,
+                    feature_names=parameters,
+                    outcome_names=[outcome],
+                    group_indices=torch.tensor(trial_indices[outcome])
+                    if trial_indices is not None
+                    else None,
+                )
 
             datasets.append(dataset)
             candidate_metadata.append(candidate_metadata_dict[outcome])
 
         if not any_candidate_metadata_is_not_none:
-            return datasets, None
+            return datasets, outcomes, None
 
-        return datasets, candidate_metadata
+        return datasets, outcomes, candidate_metadata
+
+    def _predict(
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationData]:
+        # TODO: Implement `_predict` to enable examining predicted effects
+        raise NotImplementedError
+
+
+def _prep_pairwise_data(
+    X: Tensor,
+    Y: Tensor,
+    outcome: str,
+    parameters: list[str],
+) -> SupervisedDataset:
+    """Prep data for pairwise modeling."""
+    # Update Xs and Ys shapes for PairwiseGP
+    Y = _binary_pref_to_comp_pair(Y=Y)
+    X, Y = _consolidate_comparisons(X=X, Y=Y)
+
+    datapoints, comparisons = X, Y.long()
+    event_shape = torch.Size([2 * datapoints.shape[-1]])
+    # pyre-fixme[6]: For 2nd param expected `LongTensor` but
+    dataset_X = SliceContainer(datapoints, comparisons, event_shape=event_shape)
+    dataset_Y = torch.tensor([[0, 1]]).expand(comparisons.shape)
+    dataset = RankingDataset(
+        X=dataset_X,
+        Y=dataset_Y,
+        feature_names=parameters,
+        outcome_names=[outcome],
+    )
+    return dataset
 
 
 def _binary_pref_to_comp_pair(Y: Tensor) -> Tensor:
@@ -97,7 +131,7 @@ def _binary_pref_to_comp_pair(Y: Tensor) -> Tensor:
     return comparison_pairs
 
 
-def _consolidate_comparisons(X: Tensor, Y: Tensor) -> Tuple[Tensor, Tensor]:
+def _consolidate_comparisons(X: Tensor, Y: Tensor) -> tuple[Tensor, Tensor]:
     """Drop duplicated Xs and update the indices in Ys accordingly"""
     if Y.shape[-1] != 2:
         raise ValueError(

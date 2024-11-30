@@ -4,7 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import random
+from unittest.mock import patch
 
 import pandas as pd
 from ax.core.data import (
@@ -16,9 +19,43 @@ from ax.core.data import (
 from ax.utils.common.testutils import TestCase
 from ax.utils.common.timeutils import current_timestamp_in_millis
 
+REPR_1000: str = (
+    "Data(df=\n"
+    + "|    |   arm_name | metric_name   |   mean |   sem |   trial_index "
+    + "| start_time          | end_time            |\n"
+    + "|---:|-----------:|:--------------|-------:|------:|--------------:"
+    + "|:--------------------|:--------------------|\n"
+    + "|  0 |        0_0 | a             |    2   |   0.2 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  1 |        0_0 | b             |    1.8 |   0.3 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  2 |        0_1 | a             |    4   |   0.6 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  3 |        0_1 | b             |    3.7 |   0.5 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  4 |        0_2 | a             |    0.5 | nan   |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  5 |        0_2 | b             |    3   | nan   |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |)"
+)
+
+REPR_500: str = (
+    "Data(df=\n"
+    + "|    |   arm_name | metric_name   |   mean |   sem |   trial_index "
+    + "| start_time          | end_time            |\n"
+    + "|---:|-----------:|:--------------|-------:|------:|--------------:"
+    + "|:--------------------|:--------------------|\n"
+    + "|  0 |        0_0 | a             |    2   |   0.2 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  1 |        0_0 | b             |    1.8 |   0.3 |             1 "
+    + "| 2018-01-01 00:00:00 | 2018-01-02 00:00:00 |\n"
+    + "|  2 |        0_1 | a             |    4   |   0...)"
+)
+
 
 class DataTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.df_hash = "3dd7ab8c67942d43c78ea4af05bbb1c4"
         self.df = pd.DataFrame(
             [
@@ -87,11 +124,36 @@ class DataTest(TestCase):
 
         df = data.df
         self.assertEqual(
-            float(df[df["arm_name"] == "0_0"][df["metric_name"] == "a"]["mean"]), 2.0
+            float(df[df["arm_name"] == "0_0"][df["metric_name"] == "a"]["mean"].item()),
+            2.0,
         )
         self.assertEqual(
-            float(df[df["arm_name"] == "0_1"][df["metric_name"] == "b"]["sem"]), 0.5
+            float(df[df["arm_name"] == "0_1"][df["metric_name"] == "b"]["sem"].item()),
+            0.5,
         )
+
+    def test_repr(self) -> None:
+        self.assertEqual(
+            str(Data(df=self.df)),
+            REPR_1000,
+        )
+        with patch(f"{Data.__module__}.DF_REPR_MAX_LENGTH", 500):
+            self.assertEqual(
+                str(Data(df=self.df)),
+                REPR_500,
+            )
+
+    def test_clone(self) -> None:
+        data = Data(df=self.df, description="test")
+        data._db_id = 1234
+        data_clone = data.clone()
+        # Check equality of the objects.
+        self.assertTrue(data.df.equals(data_clone.df))
+        self.assertEqual(data.description, data_clone.description)
+        # Make sure it's not the original object or df.
+        self.assertIsNot(data, data_clone)
+        self.assertIsNot(data.df, data_clone.df)
+        self.assertIsNone(data_clone._db_id)
 
     def test_BadData(self) -> None:
         df = pd.DataFrame([{"bad_field": "0_0", "bad_field_2": {"x": 0, "y": "a"}}])
@@ -101,7 +163,6 @@ class DataTest(TestCase):
     def test_EmptyData(self) -> None:
         df = Data().df
         self.assertTrue(df.empty)
-        # pyre-fixme[6]: For 1st param expected `Iterable[Variable[_T]]` but got `bool`.
         self.assertTrue(set(df.columns == Data.REQUIRED_COLUMNS))
         self.assertTrue(Data.from_multiple_data([]).df.empty)
 
@@ -288,6 +349,10 @@ class DataTest(TestCase):
                 )
             )
             Data.from_multiple_data([data_elt_A, data_elt_B])
+
+    def test_from_multiple_with_generator(self) -> None:
+        data = Data.from_multiple_data(Data(df=self.df) for _ in range(2))
+        self.assertEqual(len(data.df), 2 * len(self.df))
 
     def test_GetFilteredResults(self) -> None:
         data = Data(df=self.df)

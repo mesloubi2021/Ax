@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from itertools import product
@@ -28,9 +30,15 @@ class KernelsTest(TestCase):
         self.assertTrue(isinstance(covar.base_kernel, MaternKernel))
         self.assertTrue(isinstance(covar.base_kernel, MaternKernel))
         self.assertEqual(covar.base_kernel.ard_num_dims, 10)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute `rate`.
         self.assertEqual(covar.base_kernel.lengthscale_prior.rate, 3.0)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `concentration`.
         self.assertEqual(covar.base_kernel.lengthscale_prior.concentration, 6.0)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute `rate`.
         self.assertEqual(covar.outputscale_prior.rate, 0.15)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `concentration`.
         self.assertEqual(covar.outputscale_prior.concentration, 2.0)
         self.assertEqual(covar.base_kernel.batch_shape[0], 2)
 
@@ -59,13 +67,16 @@ class KernelsTest(TestCase):
                 fixed_period_length=fixed_period_length,
                 lengthscale_constraint=ls_constraint,
                 outputscale_constraint=os_constraint,
-                period_length_constraint=pl_constraint
-                if fixed_period_length is None
-                else None,
+                period_length_constraint=(
+                    pl_constraint if fixed_period_length is None else None
+                ),
                 temporal_lengthscale_constraint=tls_constraint,
             )
+            # pyre-fixme[29]: `Union[(self: TensorBase, indices: Union[None, slice[An...
             self.assertTrue(isinstance(covar.base_kernel.kernels[0], MaternKernel))
+            # pyre-fixme[29]: `Union[(self: TensorBase, indices: Union[None, slice[An...
             self.assertTrue(isinstance(covar.base_kernel.kernels[1], PeriodicKernel))
+            # pyre-fixme[23]: Unable to unpack `Tensor | Module` into 2 values.
             matern, periodic = covar.base_kernel.kernels
 
             self.assertEqual(matern.ard_num_dims, matern_ard_num_dims)

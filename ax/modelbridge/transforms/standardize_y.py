@@ -4,8 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections import defaultdict
 from logging import Logger
-from typing import DefaultDict, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 from ax.core.observation import Observation, ObservationData, ObservationFeatures
@@ -36,10 +39,10 @@ class StandardizeY(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["base_modelbridge.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         if observations is None or len(observations) == 0:
             raise DataRequiredError("`StandardizeY` transform requires non-empty data.")
@@ -52,8 +55,8 @@ class StandardizeY(Transform):
 
     def _transform_observation_data(
         self,
-        observation_data: List[ObservationData],
-    ) -> List[ObservationData]:
+        observation_data: list[ObservationData],
+    ) -> list[ObservationData]:
         # Transform observation data
         for obsd in observation_data:
             means = np.array([self.Ymean[m] for m in obsd.metric_names])
@@ -66,7 +69,7 @@ class StandardizeY(Transform):
         self,
         optimization_config: OptimizationConfig,
         modelbridge: Optional["base_modelbridge.ModelBridge"] = None,
-        fixed_features: Optional[ObservationFeatures] = None,
+        fixed_features: ObservationFeatures | None = None,
     ) -> OptimizationConfig:
         for c in optimization_config.all_constraints:
             if c.relative:
@@ -116,8 +119,8 @@ class StandardizeY(Transform):
 
     def _untransform_observation_data(
         self,
-        observation_data: List[ObservationData],
-    ) -> List[ObservationData]:
+        observation_data: list[ObservationData],
+    ) -> list[ObservationData]:
         for obsd in observation_data:
             means = np.array([self.Ymean[m] for m in obsd.metric_names])
             stds = np.array([self.Ystd[m] for m in obsd.metric_names])
@@ -127,9 +130,9 @@ class StandardizeY(Transform):
 
     def untransform_outcome_constraints(
         self,
-        outcome_constraints: List[OutcomeConstraint],
-        fixed_features: Optional[ObservationFeatures] = None,
-    ) -> List[OutcomeConstraint]:
+        outcome_constraints: list[OutcomeConstraint],
+        fixed_features: ObservationFeatures | None = None,
+    ) -> list[OutcomeConstraint]:
         for c in outcome_constraints:
             if c.relative:
                 raise ValueError(
@@ -144,10 +147,8 @@ class StandardizeY(Transform):
 
 
 def compute_standardization_parameters(
-    Ys: DefaultDict[Union[str, Tuple[str, TParamValue]], List[float]]
-) -> Tuple[
-    Dict[Union[str, Tuple[str, str]], float], Dict[Union[str, Tuple[str, str]], float]
-]:
+    Ys: defaultdict[str | tuple[str, TParamValue], list[float]],
+) -> tuple[dict[str | tuple[str, str], float], dict[str | tuple[str, str], float]]:
     """Compute mean and std. dev of Ys."""
     Ymean = {k: np.mean(y) for k, y in Ys.items()}
     # We use the Bessel correction term (divide by N-1) here in order to

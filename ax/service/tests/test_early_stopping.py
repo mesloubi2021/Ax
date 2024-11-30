@@ -3,7 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, Optional
+# pyre-strict
+
 
 from ax.service.utils import early_stopping as early_stopping_utils
 from ax.utils.common.testutils import TestCase
@@ -18,10 +19,11 @@ class TestEarlyStoppingUtils(TestCase):
     main `AxClient` testing suite (`TestServiceAPI`)."""
 
     def setUp(self) -> None:
+        super().setUp()
         self.branin_experiment = get_branin_experiment()
 
     def test_should_stop_trials_early(self) -> None:
-        expected: Dict[int, Optional[str]] = {
+        expected: dict[int, str | None] = {
             1: "Stopped due to testing.",
             3: "Stopped due to testing.",
         }

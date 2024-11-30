@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest import mock
 
 from ax.core.metric import Metric
@@ -24,6 +26,7 @@ OUTCOME_CONSTRAINT_PATH = "ax.core.outcome_constraint"
 
 class OutcomeConstraintTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.minimize_metric = Metric(name="bar", lower_is_better=True)
         self.maximize_metric = Metric(name="baz", lower_is_better=False)
         self.bound = 0
@@ -78,9 +81,31 @@ class OutcomeConstraintTest(TestCase):
         )
         self.assertTrue(constraint1 < constraint2)
 
+    def test_validate_constraint(self) -> None:
+        metric = Metric(name="metric0", lower_is_better=False)
+        oc = OutcomeConstraint(metric, bound=-3, relative=True, op=ComparisonOp.GEQ)
+        self.assertTrue(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=-3, relative=True, op=ComparisonOp.LEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=3, relative=True, op=ComparisonOp.GEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=3, relative=True, op=ComparisonOp.LEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+
+        metric = Metric(name="metric1", lower_is_better=True)
+        oc = OutcomeConstraint(metric, bound=3, relative=True, op=ComparisonOp.LEQ)
+        self.assertTrue(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=3, relative=True, op=ComparisonOp.GEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=-3, relative=True, op=ComparisonOp.LEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+        oc = OutcomeConstraint(metric, bound=-3, relative=True, op=ComparisonOp.GEQ)
+        self.assertFalse(oc._validate_constraint()[0])
+
 
 class ObjectiveThresholdTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.minimize_metric = Metric(name="bar", lower_is_better=True)
         self.maximize_metric = Metric(name="baz", lower_is_better=False)
         self.ambiguous_metric = Metric(name="buz")
@@ -153,6 +178,7 @@ class ObjectiveThresholdTest(TestCase):
 
 class ScalarizedOutcomeConstraintTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.metrics = [
             Metric(name="m1", lower_is_better=True),
             Metric(name="m2", lower_is_better=True),

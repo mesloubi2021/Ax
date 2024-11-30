@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.models.torch.randomforest import RandomForest
@@ -27,7 +29,6 @@ class RandomForestTest(TestCase):
         m = RandomForest(num_trees=5)
         m.fit(
             datasets=datasets,
-            metric_names=["y1", "y2"],
             search_space_digest=SearchSpaceDigest(
                 feature_names=["x1", "x2"],
                 # pyre-fixme[6]: For 2nd param expected `List[Tuple[Union[float,

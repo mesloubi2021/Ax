@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import json
-from unittest.mock import Mock, PropertyMock
+from unittest.mock import Mock, patch, PropertyMock
 
 import numpy as np
 import pandas as pd
@@ -15,7 +17,9 @@ from ax.core.batch_trial import BatchTrial
 from ax.core.data import Data
 from ax.core.generator_run import GeneratorRun
 from ax.core.map_data import MapData, MapKeyInfo
+from ax.core.map_metric import MapMetric
 from ax.core.observation import (
+    _filter_data_on_status,
     Observation,
     ObservationData,
     ObservationFeatures,
@@ -25,7 +29,9 @@ from ax.core.observation import (
     separate_observations,
 )
 from ax.core.trial import Trial
+from ax.core.types import TParameterization
 from ax.utils.common.testutils import TestCase
+from pyre_extensions import none_throws
 
 
 class ObservationsTest(TestCase):
@@ -83,7 +89,6 @@ class ObservationsTest(TestCase):
     def test_Clone(self) -> None:
         # Test simple cloning.
         arm = Arm({"x": 0, "y": "a"})
-        # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
         obsf = ObservationFeatures.from_arm(arm, trial_index=3)
         self.assertIsNot(obsf, obsf.clone())
         self.assertEqual(obsf, obsf.clone())
@@ -96,8 +101,8 @@ class ObservationsTest(TestCase):
 
     def test_ObservationFeaturesFromArm(self) -> None:
         arm = Arm({"x": 0, "y": "a"})
-        # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
         obsf = ObservationFeatures.from_arm(arm, trial_index=3)
+        self.assertIsNot(arm.parameters, obsf.parameters)
         self.assertEqual(obsf.parameters, arm.parameters)
         self.assertEqual(obsf.trial_index, 3)
 
@@ -119,11 +124,9 @@ class ObservationsTest(TestCase):
             # pyre-fixme[6]: For 1st param expected `Dict[str, Union[None, bool,
             #  float, int, str]]` but got `Dict[str, str]`.
             parameters=new_parameters,
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
             trial_index=4,
             start_time=pd.Timestamp("2005-02-25"),
             end_time=pd.Timestamp("2005-02-26"),
-            # pyre-fixme[6]: For 5th param expected `Optional[int64]` but got `int`.
             random_split=7,
         )
         obsf.update_features(new_obsf)
@@ -279,9 +282,23 @@ class ObservationsTest(TestCase):
             ["arm_name", "trial_index", "mean", "sem", "metric_name"]
         ]
         data = Data(df=df)
-        observations = observations_from_data(experiment, data)
 
+        with self.assertRaisesRegex(ValueError, "`metric_name` column is missing"):
+            observations = _filter_data_on_status(
+                df=df.drop(columns="metric_name"),
+                experiment=experiment,
+                trial_status=None,
+                is_arm_abandoned=False,
+                statuses_to_include=set(),
+                statuses_to_include_map_metric=set(),
+            )
+
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
+        observations = observations_from_data(experiment, data)
         self.assertEqual(len(observations), 2)
+        self.assertListEqual(observations[0].data.metric_names, ["a", "b"])
+        self.assertListEqual(observations[1].data.metric_names, ["a"])
+
         # Get them in the order we want for tests below
         if observations[0].features.parameters["x"] == 1:
             observations.reverse()
@@ -362,6 +379,7 @@ class ObservationsTest(TestCase):
         }
         type(experiment).arms_by_name = PropertyMock(return_value=arms)
         type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
 
         df = pd.DataFrame(list(truth.values()))[
             ["arm_name", "trial_index", "mean", "sem", "metric_name", "fidelities"]
@@ -377,7 +395,9 @@ class ObservationsTest(TestCase):
             self.assertEqual(obs.features.parameters, t["updated_parameters"])
             self.assertEqual(obs.features.trial_index, t["trial_index"])
             self.assertEqual(obs.data.metric_names, [t["metric_name"]])
+            # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtype[ty...
             self.assertTrue(np.array_equal(obs.data.means, t["mean_t"]))
+            # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtype[ty...
             self.assertTrue(np.array_equal(obs.data.covariance, t["covariance_t"]))
             self.assertEqual(obs.arm_name, t["arm_name"])
 
@@ -443,6 +463,7 @@ class ObservationsTest(TestCase):
         }
         type(experiment).arms_by_name = PropertyMock(return_value=arms)
         type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
 
         df = pd.DataFrame(list(truth.values()))[
             ["arm_name", "trial_index", "mean", "sem", "metric_name", "z", "timestamp"]
@@ -465,14 +486,16 @@ class ObservationsTest(TestCase):
             self.assertEqual(obs.features.parameters, t["updated_parameters"])
             self.assertEqual(obs.features.trial_index, t["trial_index"])
             self.assertEqual(obs.data.metric_names, [t["metric_name"]])
+            # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtype[ty...
             self.assertTrue(np.array_equal(obs.data.means, t["mean_t"]))
+            # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtype[ty...
             self.assertTrue(np.array_equal(obs.data.covariance, t["covariance_t"]))
             self.assertEqual(obs.arm_name, t["arm_name"])
             self.assertEqual(obs.features.metadata, {"timestamp": t["timestamp"]})
 
     def test_ObservationsFromDataAbandoned(self) -> None:
-        truth = {
-            0.5: {
+        truth = [
+            {
                 "arm_name": "0_0",
                 "parameters": {"x": 0, "y": "a", "z": 1},
                 "mean": 2.0,
@@ -485,7 +508,20 @@ class ObservationsTest(TestCase):
                 "z": 0.5,
                 "timestamp": 50,
             },
-            1: {
+            {
+                "arm_name": "1_0",
+                "parameters": {"x": 0, "y": "a", "z": 1},
+                "mean": 4.0,
+                "sem": 4.0,
+                "trial_index": 1,
+                "metric_name": "a",
+                "updated_parameters": {"x": 0, "y": "a", "z": 1},
+                "mean_t": np.array([4.0]),
+                "covariance_t": np.array([[16.0]]),
+                "z": 1,
+                "timestamp": 100,
+            },
+            {
                 "arm_name": "1_0",
                 "parameters": {"x": 0, "y": "a", "z": 1},
                 "mean": 4.0,
@@ -498,7 +534,20 @@ class ObservationsTest(TestCase):
                 "z": 1,
                 "timestamp": 100,
             },
-            0.25: {
+            {
+                "arm_name": "1_0",
+                "parameters": {"x": 0, "y": "a", "z": 1},
+                "mean": 4.0,
+                "sem": 4.0,
+                "trial_index": 1,
+                "metric_name": "c",
+                "updated_parameters": {"x": 0, "y": "a", "z": 1},
+                "mean_t": np.array([4.0]),
+                "covariance_t": np.array([[16.0]]),
+                "z": 1,
+                "timestamp": 100,
+            },
+            {
                 "arm_name": "2_0",
                 "parameters": {"x": 1, "y": "a", "z": 0.5},
                 "mean": 3.0,
@@ -511,7 +560,7 @@ class ObservationsTest(TestCase):
                 "z": 0.25,
                 "timestamp": 25,
             },
-            0.75: {
+            {
                 "arm_name": "2_1",
                 "parameters": {"x": 1, "y": "b", "z": 0.75},
                 "mean": 3.0,
@@ -524,7 +573,7 @@ class ObservationsTest(TestCase):
                 "z": 0.75,
                 "timestamp": 25,
             },
-        }
+        ]
         arms = {
             # pyre-fixme[6]: For 1st param expected `Optional[str]` but got
             #  `Union[Dict[str, Union[float, str]], Dict[str, Union[int, str]], float,
@@ -533,7 +582,7 @@ class ObservationsTest(TestCase):
             #  float, int, str]]` but got `Union[Dict[str, Union[float, str]],
             #  Dict[str, Union[int, str]], float, ndarray, str]`.
             obs["arm_name"]: Arm(name=obs["arm_name"], parameters=obs["parameters"])
-            for _, obs in truth.items()
+            for obs in truth
         }
         experiment = Mock()
         experiment._trial_indices_by_status = {status: set() for status in TrialStatus}
@@ -541,7 +590,7 @@ class ObservationsTest(TestCase):
             obs["trial_index"]: (
                 Trial(experiment, GeneratorRun(arms=[arms[obs["arm_name"]]]))
             )
-            for _, obs in list(truth.items())[:-1]
+            for obs in truth[:-1]
             # pyre-fixme[16]: Item `Dict` of `Union[Dict[str, typing.Union[float,
             #  str]], Dict[str, typing.Union[int, str]], float, ndarray, str]` has no
             #  attribute `startswith`.
@@ -559,23 +608,51 @@ class ObservationsTest(TestCase):
         trials.get(2).mark_arm_abandoned(arm_name="2_1")
         type(experiment).arms_by_name = PropertyMock(return_value=arms)
         type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(
+            return_value={"a": "a", "b": MapMetric(name="b")}
+        )
 
-        df = pd.DataFrame(list(truth.values()))[
+        df = pd.DataFrame(truth)[
             ["arm_name", "trial_index", "mean", "sem", "metric_name"]
         ]
         data = Data(df=df)
 
+        # Data includes metric "c" not attached to the experiment.
+        with patch("ax.core.observation.logger.exception") as mock_logger:
+            observations_from_data(experiment, data)
+        mock_logger.assert_called_once()
+        call_str = mock_logger.call_args.args[0]
+        self.assertIn("Data contains metric c that has not been", call_str)
+
+        # Add "c" to the experiment
+        type(experiment).metrics = PropertyMock(
+            return_value={"a": "a", "b": MapMetric(name="b"), "c": "c"}
+        )
         # 1 arm is abandoned and 1 trial is abandoned, so only 2 observations should be
         # included.
         obs_no_abandoned = observations_from_data(experiment, data)
         self.assertEqual(len(obs_no_abandoned), 2)
 
-        # 1 arm is abandoned and 1 trial is abandoned, so only 2 observations should be
-        # included.
+        # Including all statuses for non-map metrics should yield all metrics except b
         obs_with_abandoned = observations_from_data(
-            experiment, data, include_abandoned=True
+            experiment, data, statuses_to_include=set(TrialStatus)
         )
         self.assertEqual(len(obs_with_abandoned), 4)
+        for obs in obs_with_abandoned:
+            if obs.arm_name == "1_0":
+                self.assertEqual(set(obs.data.metric_names), {"a", "c"})
+
+        # Including all statuses for all metrics should yield all metrics
+        obs_with_abandoned = observations_from_data(
+            experiment,
+            data,
+            statuses_to_include=set(TrialStatus),
+            statuses_to_include_map_metric=set(TrialStatus),
+        )
+        self.assertEqual(len(obs_with_abandoned), 4)
+        for obs in obs_with_abandoned:
+            if obs.arm_name == "1_0":
+                self.assertEqual(set(obs.data.metric_names), {"a", "b", "c"})
 
     def test_ObservationsFromDataWithSomeMissingTimes(self) -> None:
         truth = [
@@ -635,6 +712,7 @@ class ObservationsTest(TestCase):
         }
         type(experiment).arms_by_name = PropertyMock(return_value=arms)
         type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
 
         df = pd.DataFrame(truth)[
             ["arm_name", "trial_index", "mean", "sem", "metric_name", "start_time"]
@@ -663,6 +741,117 @@ class ObservationsTest(TestCase):
                 np.array_equal(obs.data.covariance, obsd_truth["covariance"][i])
             )
             self.assertEqual(obs.arm_name, cname_truth[i])
+
+    def test_ObservationsFromDataWithDifferentTimesSingleTrial(self) -> None:
+        params0: TParameterization = {"x": 0, "y": "a"}
+        params1: TParameterization = {"x": 1, "y": "a"}
+        truth = [
+            {
+                "arm_name": "0_0",
+                "parameters": params0,
+                "mean": 2.0,
+                "sem": 2.0,
+                "trial_index": 0,
+                "metric_name": "a",
+                "start_time": "2024-03-20 08:45:00",
+                "end_time": "2024-03-20 08:47:00",
+            },
+            {
+                "arm_name": "0_0",
+                "parameters": params0,
+                "mean": 3.0,
+                "sem": 3.0,
+                "trial_index": 0,
+                "metric_name": "b",
+                "start_time": "2024-03-20 08:45:00",
+            },
+            {
+                "arm_name": "0_1",
+                "parameters": params1,
+                "mean": 4.0,
+                "sem": 4.0,
+                "trial_index": 0,
+                "metric_name": "a",
+                "start_time": "2024-03-20 08:43:00",
+                "end_time": "2024-03-20 08:46:00",
+            },
+            {
+                "arm_name": "0_1",
+                "parameters": params1,
+                "mean": 5.0,
+                "sem": 5.0,
+                "trial_index": 0,
+                "metric_name": "b",
+                "start_time": "2024-03-20 08:45:00",
+                "end_time": "2024-03-20 08:46:00",
+            },
+        ]
+        arms_by_name = {
+            "0_0": Arm(name="0_0", parameters=params0),
+            "0_1": Arm(name="0_1", parameters=params1),
+        }
+        experiment = Mock()
+        experiment._trial_indices_by_status = {status: set() for status in TrialStatus}
+        trials = {
+            0: BatchTrial(experiment, GeneratorRun(arms=list(arms_by_name.values())))
+        }
+        type(experiment).arms_by_name = PropertyMock(return_value=arms_by_name)
+        type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
+        df = pd.DataFrame(truth)[
+            [
+                "arm_name",
+                "trial_index",
+                "mean",
+                "sem",
+                "metric_name",
+                "start_time",
+                "end_time",
+            ]
+        ]
+        data = Data(df=df)
+        observations = observations_from_data(experiment, data)
+
+        self.assertEqual(len(observations), 2)
+        # Get them in the order we want for tests below
+        if observations[0].features.parameters["x"] == 1:
+            observations.reverse()
+
+        obs_truth = {
+            "arm_name": ["0_0", "0_1"],
+            "parameters": [{"x": 0, "y": "a"}, {"x": 1, "y": "a"}],
+            "metric_names": [["a", "b"], ["a", "b"]],
+            "means": [np.array([2.0, 3.0]), np.array([4.0, 5.0])],
+            "covariance": [np.diag([4.0, 9.0]), np.diag([16.0, 25.0])],
+        }
+
+        for i, obs in enumerate(observations):
+            self.assertEqual(obs.features.parameters, obs_truth["parameters"][i])
+            self.assertEqual(
+                obs.features.trial_index,
+                0,
+            )
+            self.assertEqual(obs.data.metric_names, obs_truth["metric_names"][i])
+            # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtype[ty...
+            self.assertTrue(np.array_equal(obs.data.means, obs_truth["means"][i]))
+            self.assertTrue(
+                # pyre-fixme[6]: For 2nd argument expected `Union[_SupportsArray[dtyp...
+                np.array_equal(obs.data.covariance, obs_truth["covariance"][i])
+            )
+            self.assertEqual(obs.arm_name, obs_truth["arm_name"][i])
+            self.assertEqual(obs.arm_name, obs_truth["arm_name"][i])
+            if i == 0:
+                self.assertEqual(
+                    none_throws(obs.features.start_time).strftime("%Y-%m-%d %X"),
+                    "2024-03-20 08:45:00",
+                )
+                self.assertIsNone(obs.features.end_time)
+            else:
+                self.assertIsNone(obs.features.start_time)
+                self.assertEqual(
+                    none_throws(obs.features.end_time).strftime("%Y-%m-%d %X"),
+                    "2024-03-20 08:46:00",
+                )
 
     def test_SeparateObservations(self) -> None:
         obs_arm_name = "0_0"
@@ -747,6 +936,7 @@ class ObservationsTest(TestCase):
         }
         type(experiment).arms_by_name = PropertyMock(return_value=arms)
         type(experiment).trials = PropertyMock(return_value=trials)
+        type(experiment).metrics = PropertyMock(return_value={"a": "a", "b": "b"})
 
         df = pd.DataFrame(truth)[
             ["arm_name", "trial_index", "mean", "sem", "metric_name"]

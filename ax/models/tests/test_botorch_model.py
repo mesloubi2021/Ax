@@ -4,13 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import dataclasses
 from itertools import chain, product
-from typing import Any, cast, Dict
+from typing import Any, cast
 from unittest import mock
 
 import numpy as np
-
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.exceptions.core import DataRequiredError
@@ -22,23 +23,24 @@ from ax.models.torch.botorch import (
 from ax.models.torch.botorch_defaults import (
     get_and_fit_model,
     get_chebyshev_scalarization,
-    recommend_best_out_of_sample_point,
 )
 from ax.models.torch.utils import sample_simplex
 from ax.models.torch_base import TorchOptConfig
 from ax.utils.common.testutils import TestCase
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 from ax.utils.testing.torch_stubs import get_torch_test_data
 from botorch.acquisition.utils import get_infeasible_cost
 from botorch.models import ModelListGP, SingleTaskGP
 from botorch.models.transforms.input import Warp
 from botorch.utils.datasets import SupervisedDataset
 from botorch.utils.objective import get_objective_weights_transform
+from gpytorch.kernels.constant_kernel import ConstantKernel
 from gpytorch.likelihoods import _GaussianLikelihoodBase
 from gpytorch.likelihoods.gaussian_likelihood import FixedNoiseGaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood, LeaveOneOutPseudoLikelihood
 from gpytorch.priors import GammaPrior
 from gpytorch.priors.lkj_prior import LKJCovariancePrior
+from pyre_extensions import none_throws
 
 
 FIT_MODEL_MO_PATH = f"{get_and_fit_model.__module__}.fit_gpytorch_mll"
@@ -70,14 +72,14 @@ class BotorchModelTest(TestCase):
                 Y=Ys1[0],
                 Yvar=Yvars1[0],
                 feature_names=feature_names,
-                outcome_names=metric_names,
+                outcome_names=["y"],
             ),
             SupervisedDataset(
                 X=Xs2[0],
                 Y=Ys2[0],
                 Yvar=Yvars2[0],
                 feature_names=feature_names,
-                outcome_names=metric_names,
+                outcome_names=["w"],
             ),
         ]
         with self.assertRaisesRegex(RuntimeError, "Please fit the model first"):
@@ -97,7 +99,6 @@ class BotorchModelTest(TestCase):
         with mock.patch(FIT_MODEL_MO_PATH) as _mock_fit_model:
             model.fit(
                 datasets=datasets,
-                metric_names=["y", "w"],
                 search_space_digest=search_space_digest,
             )
             self.assertTrue(isinstance(model.search_space_digest, SearchSpaceDigest))
@@ -119,7 +120,7 @@ class BotorchModelTest(TestCase):
         Xs2, Ys2, Yvars2, _, _, _, _ = get_torch_test_data(
             dtype=dtype, cuda=cuda, constant_noise=True
         )
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "prior": {
                 "covar_module_prior": {
                     "lengthscale_prior": GammaPrior(6.0, 3.0),
@@ -130,7 +131,7 @@ class BotorchModelTest(TestCase):
                 "eta": 0.6,
             }
         }
-        model = BotorchModel(**kwargs)  # pyre-ignore [6]
+        model = BotorchModel(**kwargs)
         datasets = [
             SupervisedDataset(
                 X=Xs1[0],
@@ -151,7 +152,6 @@ class BotorchModelTest(TestCase):
         with mock.patch(FIT_MODEL_MO_PATH) as _mock_fit_model:
             model.fit(
                 datasets=datasets,
-                metric_names=["y", "w"],
                 search_space_digest=SearchSpaceDigest(
                     feature_names=feature_names,
                     bounds=bounds,
@@ -194,7 +194,7 @@ class BotorchModelTest(TestCase):
                 0.6,
             )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_BotorchModel(
         self, dtype: torch.dtype = torch.float, cuda: bool = False
     ) -> None:
@@ -240,7 +240,6 @@ class BotorchModelTest(TestCase):
                 with mock.patch(FIT_MODEL_MO_PATH) as _mock_fit_model:
                     model.fit(
                         datasets=datasets,
-                        metric_names=metric_names,
                         search_space_digest=SearchSpaceDigest(
                             feature_names=feature_names,
                             bounds=bounds,
@@ -304,7 +303,6 @@ class BotorchModelTest(TestCase):
             with mock.patch(FIT_MODEL_MO_PATH) as _mock_fit_model:
                 model.fit(
                     datasets=datasets_block,
-                    metric_names=["y1", "y2"],
                     search_space_digest=SearchSpaceDigest(
                         feature_names=feature_names,
                         bounds=bounds,
@@ -331,8 +329,7 @@ class BotorchModelTest(TestCase):
 
                 if not use_input_warping:
                     expected_train_inputs = expected_train_inputs.unsqueeze(0).expand(
-                        torch.Size([2])
-                        + Xs1[0].shape  # pyre-fixme[58]: Unsupported operand
+                        2, *Xs1[0].shape
                     )
                     expected_train_targets = torch.cat(Ys1 + Ys2, dim=-1).permute(1, 0)
                 else:
@@ -355,7 +352,7 @@ class BotorchModelTest(TestCase):
                 self.assertIsInstance(m.likelihood, _GaussianLikelihoodBase)
 
             # Check infeasible cost can be computed on the model
-            tkwargs: Dict[str, Any] = {
+            tkwargs: dict[str, Any] = {
                 "device": torch.device("cuda" if cuda else "cpu"),
                 "dtype": dtype,
             }
@@ -477,10 +474,8 @@ class BotorchModelTest(TestCase):
                 )
 
             # test get_rounding_func
-            dummy_rounding = get_rounding_func(rounding_func=dummy_func)
+            dummy_rounding = none_throws(get_rounding_func(rounding_func=dummy_func))
             X_temp = torch.rand(1, 2, 3, 4)
-            # pyre-fixme[29]: `Optional[typing.Callable[[torch._tensor.Tensor],
-            #  torch._tensor.Tensor]]` is not a function.
             self.assertTrue(torch.equal(X_temp, dummy_rounding(X_temp)))
 
             # Check best point selection
@@ -528,7 +523,6 @@ class BotorchModelTest(TestCase):
             ]
             mean, variance = model.cross_validate(
                 datasets=combined_datasets,
-                metric_names=["y1", "y2"],
                 X_test=torch.tensor([[1.2, 3.2, 4.2], [2.4, 5.2, 3.2]], **tkwargs),
             )
             self.assertTrue(mean.shape == torch.Size([2, 2]))
@@ -538,7 +532,6 @@ class BotorchModelTest(TestCase):
             model.refit_on_cv = True
             mean, variance = model.cross_validate(
                 datasets=combined_datasets,
-                metric_names=["y1", "y2"],
                 X_test=torch.tensor([[1.2, 3.2, 4.2], [2.4, 5.2, 3.2]], **tkwargs),
             )
             self.assertTrue(mean.shape == torch.Size([2, 2]))
@@ -555,7 +548,6 @@ class BotorchModelTest(TestCase):
             ):
                 unfit_model.cross_validate(
                     datasets=combined_datasets,
-                    metric_names=["y1", "y2"],
                     X_test=Xs1[0],
                 )
             with self.assertRaisesRegex(
@@ -566,19 +558,12 @@ class BotorchModelTest(TestCase):
 
             # Test loading state dict
             true_state_dict = {
-                "mean_module.raw_constant": 3.5004,
-                "covar_module.raw_outputscale": 2.2438,
-                "covar_module.base_kernel.raw_lengthscale": [
-                    [-0.9274, -0.9274, -0.9274]
-                ],
-                "covar_module.base_kernel.raw_lengthscale_constraint.lower_bound": 0.1,
-                "covar_module.base_kernel.raw_lengthscale_constraint.upper_bound": 2.5,
-                "covar_module.base_kernel.lengthscale_prior.concentration": 3.0,
-                "covar_module.base_kernel.lengthscale_prior.rate": 6.0,
-                "covar_module.raw_outputscale_constraint.lower_bound": 0.2,
-                "covar_module.raw_outputscale_constraint.upper_bound": 2.6,
-                "covar_module.outputscale_prior.concentration": 2.0,
-                "covar_module.outputscale_prior.rate": 0.15,
+                "mean_module.raw_constant": 1.0,
+                "covar_module.raw_lengthscale": [[0.3548, 0.3548, 0.3548]],
+                "covar_module.lengthscale_prior._transformed_loc": 1.9635,
+                "covar_module.lengthscale_prior._transformed_scale": 1.7321,
+                "covar_module.raw_lengthscale_constraint.lower_bound": 0.0250,
+                "covar_module.raw_lengthscale_constraint.upper_bound": float("inf"),
             }
             true_state_dict = {
                 key: torch.tensor(val, **tkwargs)
@@ -599,8 +584,7 @@ class BotorchModelTest(TestCase):
 
             # Test for some change in model parameters & buffer for refit_model=True
             true_state_dict["mean_module.raw_constant"] += 0.1
-            true_state_dict["covar_module.raw_outputscale"] += 0.1
-            true_state_dict["covar_module.base_kernel.raw_lengthscale"] += 0.1
+            true_state_dict["covar_module.raw_lengthscale"] += 0.1
             model = get_and_fit_model(
                 Xs=Xs1,
                 Ys=Ys1,
@@ -616,29 +600,6 @@ class BotorchModelTest(TestCase):
                     not torch.equal(true_state_dict[k], v)
                     for k, v in chain(model.named_parameters(), model.named_buffers())
                 )
-            )
-
-        # Test that recommend_best_out_of_sample_point errors w/o _get_best_point_acqf
-        model = BotorchModel(best_point_recommender=recommend_best_out_of_sample_point)
-        with mock.patch(FIT_MODEL_MO_PATH) as _mock_fit_model:
-            model.fit(
-                # pyre-fixme[61]: `datasets` is undefined, or not always defined.
-                datasets=datasets,
-                metric_names=metric_names,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=feature_names,
-                    bounds=bounds,
-                    task_features=tfs,
-                ),
-            )
-        with self.assertRaises(RuntimeError):
-            xbest = model.best_point(
-                # pyre-fixme[61]: `search_space_digest` is undefined, or not always
-                #  defined.
-                search_space_digest=search_space_digest,
-                # pyre-fixme[61]: `torch_opt_config` is undefined, or not always
-                #  defined.
-                torch_opt_config=torch_opt_config,
             )
 
     def test_BotorchModel_cuda(self) -> None:
@@ -680,7 +641,6 @@ class BotorchModelTest(TestCase):
                             outcome_names=metric_names,
                         )
                     ],
-                    metric_names=metric_names[:1],
                     search_space_digest=SearchSpaceDigest(
                         feature_names=feature_names,
                         bounds=bounds,
@@ -749,7 +709,6 @@ class BotorchModelTest(TestCase):
                         outcome_names=metric_names,
                     ),
                 ],
-                metric_names=metric_names,
                 search_space_digest=search_space_digest,
             )
             _mock_fit_model.assert_called_once()
@@ -777,26 +736,25 @@ class BotorchModelTest(TestCase):
         ):
             model.fit(
                 datasets=[],
-                metric_names=metric_names,
                 search_space_digest=search_space_digest,
             )
 
     def test_get_feature_importances_from_botorch_model(self) -> None:
-        tkwargs = {"dtype": torch.double}
-        train_X = torch.rand(5, 3, **tkwargs)  # pyre-ignore [6]
+        tkwargs: dict[str, Any] = {"dtype": torch.double}
+        train_X = torch.rand(5, 3, **tkwargs)
         train_Y = train_X.sum(dim=-1, keepdim=True)
         simple_gp = SingleTaskGP(train_X=train_X, train_Y=train_Y)
-        simple_gp.covar_module.base_kernel.lengthscale = torch.tensor(
-            [1, 3, 5], **tkwargs  # pyre-ignore [6]
-        )
+        # pyre-fixme[16]: `Module` has no attribute `lengthscale`.
+        simple_gp.covar_module.lengthscale = torch.tensor([1, 3, 5], **tkwargs)
         importances = get_feature_importances_from_botorch_model(simple_gp)
         self.assertTrue(np.allclose(importances, np.array([15 / 23, 5 / 23, 3 / 23])))
         self.assertEqual(importances.shape, (1, 1, 3))
-        # Model with no base kernel
-        simple_gp.covar_module.base_kernel = None  # pyre-ignore [16]
+        # Model with kernel that has no lengthscales
+        simple_gp.covar_module = ConstantKernel()
         with self.assertRaisesRegex(
             NotImplementedError,
-            "Failed to extract lengthscales from `m.covar_module.base_kernel`",
+            "Failed to extract lengthscales from `m.covar_module` and "
+            "`m.covar_module.base_kernel`",
         ):
             get_feature_importances_from_botorch_model(simple_gp)
 

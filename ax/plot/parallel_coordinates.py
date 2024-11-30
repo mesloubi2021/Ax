@@ -4,7 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional
+# pyre-strict
+
 
 import pandas as pd
 from ax.core.experiment import Experiment
@@ -15,7 +16,7 @@ from plotly import express as px, graph_objs as go
 
 def prepare_experiment_for_plotting(
     experiment: Experiment,
-    ignored_names: Optional[List[str]] = None,
+    ignored_names: list[str] | None = None,
 ) -> pd.DataFrame:
     """Strip variables not desired in the final plot and truncate names for readability
 
@@ -39,11 +40,6 @@ def prepare_experiment_for_plotting(
     dropped = df.drop(ignored_names, axis=1)
 
     renamed = dropped.rename(
-        # pyre-fixme[6] Expected `typing.Union[
-        # typing.Callable[[Optional[typing.Hashable]], Optional[typing.Hashable]],
-        # None, typing.Mapping[Optional[typing.Hashable], typing.Any]]` for 1st
-        # parameter `columns` to call `pd.core.frame.DataFrame.rename` but got
-        # `typing.Dict[str, str]`.
         columns=_get_shortest_unique_suffix_dict([str(c) for c in dropped.columns])
     )
 
@@ -51,7 +47,7 @@ def prepare_experiment_for_plotting(
 
 
 def plot_parallel_coordinates_plotly(
-    experiment: Experiment, ignored_names: Optional[List[str]] = None
+    experiment: Experiment, ignored_names: list[str] | None = None
 ) -> go.Figure:
     """Plot trials as a parallel coordinates graph
 
@@ -72,7 +68,7 @@ def plot_parallel_coordinates_plotly(
 
 
 def plot_parallel_coordinates(
-    experiment: Experiment, ignored_names: Optional[List[str]] = None
+    experiment: Experiment, ignored_names: list[str] | None = None
 ) -> AxPlotConfig:
     """Plot trials as a parallel coordinates graph
 
@@ -89,4 +85,5 @@ def plot_parallel_coordinates(
         experiment=experiment, ignored_names=ignored_names
     )
 
+    # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got `Figure`.
     return AxPlotConfig(data=fig, plot_type=AxPlotTypes.GENERIC)

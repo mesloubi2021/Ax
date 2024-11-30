@@ -2,17 +2,17 @@
     :class: hidden-section
 
 ax.utils
-===================================
+========
 
 .. automodule:: ax.utils
 .. currentmodule:: ax.utils
 
 
 Common
----------------
+------
 
 Base
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~
 
 .. automodule:: ax.utils.common.base
     :members:
@@ -20,7 +20,7 @@ Base
     :show-inheritance:
 
 Constants
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.constants
     :members:
@@ -28,15 +28,23 @@ Constants
     :show-inheritance:
 
 Decorator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.decorator
     :members:
     :undoc-members:
     :show-inheritance:
 
+Deprecation
+~~~~~~~~~~~
+
+.. automodule:: ax.utils.common.deprecation
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Docutils
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
 
 .. automodule:: ax.utils.common.docutils
     :members:
@@ -44,23 +52,31 @@ Docutils
     :show-inheritance:
 
 Equality
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
 
 .. automodule:: ax.utils.common.equality
     :members:
     :undoc-members:
     :show-inheritance:
 
-Equality
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Executils
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.executils
     :members:
     :undoc-members:
     :show-inheritance:
 
+FuncEnum
+~~~~~~~~
+
+.. automodule:: ax.utils.common.func_enum
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Kwargs
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~
 
 .. automodule:: ax.utils.common.kwargs
     :members:
@@ -68,7 +84,7 @@ Kwargs
     :show-inheritance:
 
 Logger
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~
 
 .. automodule:: ax.utils.common.logger
     :members:
@@ -83,6 +99,14 @@ Mock Torch
     :undoc-members:
     :show-inheritance:
 
+Random
+~~~~~~
+
+.. automodule:: ax.utils.common.random
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Result
 ~~~~~~
 
@@ -92,7 +116,7 @@ Result
     :show-inheritance:
 
 Serialization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.common.serialization
     :members:
@@ -100,7 +124,7 @@ Serialization
     :show-inheritance:
 
 Testutils
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.testutils
     :members:
@@ -108,7 +132,7 @@ Testutils
     :show-inheritance:
 
 Timeutils
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.timeutils
     :members:
@@ -116,15 +140,23 @@ Timeutils
     :show-inheritance:
 
 Typeutils
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~
 
 .. automodule:: ax.utils.common.typeutils
     :members:
     :undoc-members:
     :show-inheritance:
 
+Typeutils Non-Native
+~~~~~~~~~~~~~~~
+
+.. automodule:: ax.utils.common.typeutils_nonnative
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Typeutils Torch
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.common.typeutils_torch
     :members:
@@ -132,10 +164,10 @@ Typeutils Torch
     :show-inheritance:
 
 Flake8 Plugins
----------------
+--------------
 
 Docstring Checker
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.flake8_plugins.docstring_checker
     :members:
@@ -143,10 +175,10 @@ Docstring Checker
     :show-inheritance:
 
 Measurement
----------------
+-----------
 
 Synthetic Functions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.measurement.synthetic_functions
     :members:
@@ -154,10 +186,10 @@ Synthetic Functions
     :show-inheritance:
 
 Notebook
----------------
+--------
 
 Plotting
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~
 
 .. automodule:: ax.utils.notebook.plotting
     :members:
@@ -165,10 +197,10 @@ Plotting
     :show-inheritance:
 
 Report
----------------
+------
 
 Render
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~
 
 .. automodule:: ax.utils.report.render
     :members:
@@ -176,10 +208,10 @@ Render
     :show-inheritance:
 
 Sensitivity
----------------
+-----------
 
 Derivative GP
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.sensitivity.derivative_gp
     :members:
@@ -187,7 +219,7 @@ Derivative GP
     :show-inheritance:
 
 Derivative Measures
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.sensitivity.derivative_measures
     :members:
@@ -195,7 +227,7 @@ Derivative Measures
     :show-inheritance:
 
 Sobol Measures
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.sensitivity.sobol_measures
     :members:
@@ -203,10 +235,10 @@ Sobol Measures
     :show-inheritance:
 
 Stats
----------------
+-----
 
 Statstools
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~
 
 .. automodule:: ax.utils.stats.statstools
     :members:
@@ -214,27 +246,15 @@ Statstools
     :show-inheritance:
 
 Model Fit Metrics
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.stats.model_fit_stats
     :members:
     :undoc-members:
     :show-inheritance:
 
-Storage
----------------
-
-Deletion
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.utils.storage.sqa.delete
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-
 Testing
----------------
+-------
 
 Backend Scheduler
 ~~~~~~~~~~~~~~~~~
@@ -253,7 +273,7 @@ Backend Simulator
     :show-inheritance:
 
 Benchmark Stubs
-~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.testing.benchmark_stubs
     :members:
@@ -261,7 +281,7 @@ Benchmark Stubs
     :show-inheritance:
 
 Core Stubs
-~~~~~~~~~~~
+~~~~~~~~~~
 
 .. automodule:: ax.utils.testing.core_stubs
     :members:
@@ -269,16 +289,31 @@ Core Stubs
     :show-inheritance:
 
 Modeling Stubs
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~
 
 .. automodule:: ax.utils.testing.modeling_stubs
     :members:
     :undoc-members:
     :show-inheritance:
 
+Preference Stubs
+~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.utils.testing.preference_stubs
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Utils Testing Stubs
+~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: ax.utils.testing.utils_testing_stubs
+    :members:
+    :undoc-members:
+    :show-inheritance:
 
 Mocking
-~~~~~~~~~~~~~~~
+~~~~~~~
 
 .. automodule:: ax.utils.testing.mock
     :members:
@@ -295,23 +330,15 @@ Test Init Files
     :show-inheritance:
 
 Torch Stubs
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~
 
 .. automodule:: ax.utils.testing.torch_stubs
     :members:
     :undoc-members:
     :show-inheritance:
 
-Unittest Conventions
-~~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: ax.utils.testing.unittest_conventions
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 Utils
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~
 
 .. automodule:: ax.utils.testing.utils
     :members:
@@ -320,7 +347,7 @@ Utils
 
 
 Test Metrics
----------------
+------------
 
 Backend Simulator Map
 ~~~~~~~~~~~~~~~~~~~~~
@@ -341,10 +368,10 @@ Branin Backend Map
 
 
 Tutorials
----------------
+---------
 
 Neural Net
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~
 
 .. automodule:: ax.utils.tutorials.cnn_utils
     :members:

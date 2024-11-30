@@ -4,7 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict
+# pyre-strict
+
+from typing import Any
 
 
 class Model:
@@ -18,7 +20,7 @@ class Model:
     """
 
     @classmethod
-    def serialize_state(cls, raw_state: Dict[str, Any]) -> Dict[str, Any]:
+    def serialize_state(cls, raw_state: dict[str, Any]) -> dict[str, Any]:
         """Serialized output of `self._get_state` to a JSON-ready dict.
         This may involve storing part of state in files / external storage and
         saving handles for that storage in the resulting serialized state.
@@ -26,13 +28,13 @@ class Model:
         return raw_state
 
     @classmethod
-    def deserialize_state(cls, serialized_state: Dict[str, Any]) -> Dict[str, Any]:
+    def deserialize_state(cls, serialized_state: dict[str, Any]) -> dict[str, Any]:
         """Restores model's state from its serialized form, to the format it
         expects to receive as kwargs.
         """
         return serialized_state
 
-    def _get_state(self) -> Dict[str, Any]:
+    def _get_state(self) -> dict[str, Any]:
         """Obtain the state of this model, in order to be able to serialize it
         and restore it from the serialized version.
 
@@ -56,3 +58,6 @@ class Model:
         raise NotImplementedError(
             "Feature importance not available for this Model type"
         )
+
+    def __repr__(self) -> str:
+        return self.__class__.__name__

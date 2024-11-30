@@ -3,11 +3,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from abc import ABC, abstractmethod, abstractproperty
+import traceback
 
-from typing import Any, Callable, cast, Generic, NoReturn, Optional, TypeVar, Union
+from abc import ABC, abstractmethod, abstractproperty
+from collections.abc import Callable
+from functools import reduce
+
+from typing import Any, cast, Generic, NoReturn, TypeVar
 
 
 T = TypeVar("T", covariant=True)
@@ -32,15 +38,15 @@ class Result(Generic[T, E], ABC):
         pass
 
     @abstractproperty
-    def ok(self) -> Optional[T]:
+    def ok(self) -> T | None:
         pass
 
     @abstractproperty
-    def err(self) -> Optional[E]:
+    def err(self) -> E | None:
         pass
 
     @abstractproperty
-    def value(self) -> Union[T, E]:
+    def value(self) -> T | E:
         pass
 
     @abstractmethod
@@ -254,5 +260,37 @@ class UnwrapError(Exception):
     This should not happen in real world use and indicates a user has impropperly
     or unsafely used the Result abstraction.
     """
+
+    pass
+
+
+class ExceptionE:
+    """
+    A class that holds an Exception and can be used as the E type in Result[T, E].
+    """
+
+    message: str
+    exception: Exception
+
+    def __init__(self, message: str, exception: Exception) -> None:
+        self.message = message
+        self.exception = exception
+
+    def __repr__(self) -> str:
+        return (
+            f'ExceptionE(message="{self.message}", exception={self.exception})\n'
+            f"with Traceback:\n {self.tb_str()}"
+        )
+
+    def tb_str(self) -> str | None:
+        if self.exception is None:
+            return None
+
+        return reduce(
+            lambda left, right: left + right,
+            traceback.format_exception(
+                None, self.exception, self.exception.__traceback__
+            ),
+        )
 
     pass

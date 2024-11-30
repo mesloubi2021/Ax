@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from logging import Logger
-from typing import Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from ax.core.observation import Observation, ObservationFeatures
 from ax.core.parameter import Parameter, ParameterType, RangeParameter
@@ -18,7 +20,8 @@ from ax.modelbridge.transforms.rounding import (
 from ax.modelbridge.transforms.utils import construct_new_search_space
 from ax.models.types import TConfig
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 if TYPE_CHECKING:
     # import as module to make sphinx-autodoc-typehints happy
@@ -46,12 +49,12 @@ class IntToFloat(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
-        self.search_space: SearchSpace = not_none(
+        self.search_space: SearchSpace = none_throws(
             search_space, "IntToFloat requires search space"
         )
         config = config or {}
@@ -62,12 +65,12 @@ class IntToFloat(Transform):
         self.min_choices: int = checked_cast(int, config.get("min_choices", 0))
 
         # Identify parameters that should be transformed
-        self.transform_parameters: Set[str] = {
+        self.transform_parameters: set[str] = {
             p_name
             for p_name, p in self.search_space.parameters.items()
             if isinstance(p, RangeParameter)
             and p.parameter_type == ParameterType.INT
-            and (p.upper - p.lower + 1 >= self.min_choices or p.log_scale)
+            and ((p.cardinality() >= self.min_choices) or p.log_scale)
         }
         if contains_constrained_integer(self.search_space, self.transform_parameters):
             self.rounding = "randomized"
@@ -76,8 +79,8 @@ class IntToFloat(Transform):
             self.contains_constrained_integer: bool = False
 
     def transform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         for obsf in observation_features:
             for p_name in self.transform_parameters:
                 if p_name in obsf.parameters:
@@ -88,7 +91,7 @@ class IntToFloat(Transform):
         return observation_features
 
     def _transform_search_space(self, search_space: SearchSpace) -> SearchSpace:
-        transformed_parameters: Dict[str, Parameter] = {}
+        transformed_parameters: dict[str, Parameter] = {}
         for p_name, p in search_space.parameters.items():
             if p_name in self.transform_parameters and isinstance(p, RangeParameter):
                 transformed_parameters[p_name] = RangeParameter(
@@ -120,8 +123,8 @@ class IntToFloat(Transform):
         )
 
     def untransform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         for obsf in observation_features:
             present_params = self.transform_parameters.intersection(
                 obsf.parameters.keys()

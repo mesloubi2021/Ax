@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import json
 from json import JSONDecodeError
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ax.storage.sqa_store.db import JSON_FIELD_LENGTH, LONGTEXT_BYTES, MEDIUMTEXT_BYTES
 from sqlalchemy.ext.mutable import MutableDict, MutableList
@@ -30,15 +32,15 @@ class JSONEncodedObject(TypeDecorator):
         self,
         # pyre-fixme[2]: Parameter annotation cannot be `Any`.
         object_pairs_hook: Any = None,
-        *args: List[Any],
-        **kwargs: Dict[Any, Any],
+        *args: list[Any],
+        **kwargs: dict[Any, Any],
     ) -> None:
         # pyre-fixme[4]: Attribute annotation cannot be `Any`.
         self.object_pairs_hook: Any = object_pairs_hook
         super().__init__(*args, **kwargs)
 
     # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-    def process_bind_param(self, value: Any, dialect: Any) -> Optional[str]:
+    def process_bind_param(self, value: Any, dialect: Any) -> str | None:
         if value is not None:
             return json.dumps(value)
         else:

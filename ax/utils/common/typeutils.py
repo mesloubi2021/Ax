@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
+# pyre-strict
 
-import numpy as np
+from typing import Any, TypeVar
 
 
 T = TypeVar("T")
@@ -16,24 +15,7 @@ X = TypeVar("X")
 Y = TypeVar("Y")
 
 
-def not_none(val: Optional[T], message: Optional[str] = None) -> T:
-    """
-    Unbox an optional type.
-
-    Args:
-      val: the value to cast to a non ``None`` type
-      message: optional override of the default error message
-    Returns:
-      V:  ``val`` when ``val`` is not ``None``
-    Throws:
-      ValueError if ``val`` is ``None``
-    """
-    if val is None:
-        raise ValueError(message or "Argument to `not_none` was None.")
-    return val
-
-
-def checked_cast(typ: Type[T], val: V, exception: Optional[Exception] = None) -> T:
+def checked_cast(typ: type[T], val: V, exception: Exception | None = None) -> T:
     """
     Cast a value to a type (with a runtime safety check).
 
@@ -54,20 +36,22 @@ def checked_cast(typ: Type[T], val: V, exception: Optional[Exception] = None) ->
     .. _typing.cast: https://docs.python.org/3/library/typing.html#typing.cast
     """
     if not isinstance(val, typ):
-        raise exception if exception is not None else ValueError(
-            f"Value was not of type {typ}:\n{val}"
+        raise (
+            exception
+            if exception is not None
+            else ValueError(f"Value was not of type {typ}:\n{val}")
         )
     return val
 
 
-def checked_cast_optional(typ: Type[T], val: Optional[V]) -> Optional[T]:
+def checked_cast_optional(typ: type[T], val: V | None) -> T | None:
     """Calls checked_cast only if value is not None."""
     if val is None:
         return val
     return checked_cast(typ, val)
 
 
-def checked_cast_list(typ: Type[T], old_l: List[V]) -> List[T]:
+def checked_cast_list(typ: type[T], old_l: list[V]) -> list[T]:
     """Calls checked_cast on all items in a list."""
     new_l = []
     for val in old_l:
@@ -77,8 +61,8 @@ def checked_cast_list(typ: Type[T], old_l: List[V]) -> List[T]:
 
 
 def checked_cast_dict(
-    key_typ: Type[K], value_typ: Type[V], d: Dict[X, Y]
-) -> Dict[K, V]:
+    key_typ: type[K], value_typ: type[V], d: dict[X, Y]
+) -> dict[K, V]:
     """Calls checked_cast on all keys and values in the dictionary."""
     new_dict = {}
     for key, val in d.items():
@@ -89,7 +73,7 @@ def checked_cast_dict(
 
 
 # pyre-fixme[34]: `T` isn't present in the function's parameters.
-def checked_cast_to_tuple(typ: Tuple[Type[V], ...], val: V) -> T:
+def checked_cast_to_tuple(typ: tuple[type[V], ...], val: V) -> T:
     """
     Cast a value to a union of multiple types (with a runtime safety check).
     This function is similar to `checked_cast`, but allows for the type to be
@@ -108,23 +92,10 @@ def checked_cast_to_tuple(typ: Tuple[Type[V], ...], val: V) -> T:
     return val
 
 
-# pyre-fixme[3]: Return annotation cannot be `Any`.
-# pyre-fixme[2]: Parameter annotation cannot be `Any`.
-def numpy_type_to_python_type(value: Any) -> Any:
-    """If `value` is a Numpy int or float, coerce to a Python int or float.
-    This is necessary because some of our transforms return Numpy values.
-    """
-    if isinstance(value, np.integer):
-        value = int(value)  # pragma: nocover (covered by generator tests)
-    if isinstance(value, np.floating):
-        value = float(value)  # pragma: nocover  (covered by generator tests)
-    return value
-
-
 # pyre-fixme[2]: Parameter annotation cannot be `Any`.
 # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use `typing.Type` to
 #  avoid runtime subscripting errors.
-def _argparse_type_encoder(arg: Any) -> Type:
+def _argparse_type_encoder(arg: Any) -> type:
     """
     Transforms arguments passed to `optimizer_argparse.__call__`
     at runtime to construct the key used for method lookup as

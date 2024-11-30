@@ -3,7 +3,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
+# pyre-strict
+
+from logging import Logger
 
 from ax.core.experiment import Experiment
 from ax.modelbridge.generation_strategy import GenerationStrategy
@@ -11,6 +13,9 @@ from ax.storage.sqa_store.db import session_scope
 from ax.storage.sqa_store.decoder import Decoder
 from ax.storage.sqa_store.sqa_classes import SQAExperiment
 from ax.storage.sqa_store.sqa_config import SQAConfig
+from ax.utils.common.logger import get_logger
+
+logger: Logger = get_logger(__name__)
 
 
 def delete_experiment(exp_name: str) -> None:
@@ -24,10 +29,12 @@ def delete_experiment(exp_name: str) -> None:
         session.delete(exp)
         session.flush()
 
+    logger.info(
+        f"You are deleting {exp_name} and all its associated data from the database."
+    )
 
-def delete_generation_strategy(
-    exp_name: str, config: Optional[SQAConfig] = None
-) -> None:
+
+def delete_generation_strategy(exp_name: str, config: SQAConfig | None = None) -> None:
     """Delete the generation strategy associated with an experiment
 
     Args:

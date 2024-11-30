@@ -3,11 +3,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from math import inf
-from typing import Dict, List, Optional, Tuple
 
 from ax.core.base_trial import TrialStatus
 
@@ -23,8 +24,8 @@ from ax.core.search_space import HierarchicalSearchSpace, SearchSpace
 from ax.core.utils import get_model_times
 from ax.telemetry.common import INITIALIZATION_MODELS, OTHER_MODELS
 
-INITIALIZATION_MODEL_STRS: List[str] = [enum.value for enum in INITIALIZATION_MODELS]
-OTHER_MODEL_STRS: List[str] = [enum.value for enum in OTHER_MODELS]
+INITIALIZATION_MODEL_STRS: list[str] = [enum.value for enum in INITIALIZATION_MODELS]
+OTHER_MODEL_STRS: list[str] = [enum.value for enum in OTHER_MODELS] + [None]
 
 
 @dataclass(frozen=True)
@@ -36,8 +37,8 @@ class ExperimentCreatedRecord:
     bools, and None.
     """
 
-    experiment_name: Optional[str]
-    experiment_type: Optional[str]
+    experiment_name: str | None
+    experiment_type: str | None
 
     # SearchSpace info
     num_continuous_range_parameters: int
@@ -68,7 +69,7 @@ class ExperimentCreatedRecord:
 
     # General Metrics info
     num_map_metrics: int
-    metric_cls_to_quantity: Dict[str, int]
+    metric_cls_to_quantity: dict[str, int]
 
     # Runner info
     runner_cls: str
@@ -106,21 +107,25 @@ class ExperimentCreatedRecord:
             dimensionality=sum(
                 1 for param in experiment.parameters.values() if param.cardinality() > 1
             ),
-            hierarchical_tree_height=experiment.search_space.height
-            if isinstance(experiment.search_space, HierarchicalSearchSpace)
-            else 1,
+            hierarchical_tree_height=(
+                experiment.search_space.height
+                if isinstance(experiment.search_space, HierarchicalSearchSpace)
+                else 1
+            ),
             num_parameter_constraints=len(
                 experiment.search_space.parameter_constraints
             ),
-            num_objectives=len(experiment.optimization_config.objective.metrics)
-            if experiment.optimization_config is not None
-            else 0,
+            num_objectives=(
+                len(experiment.optimization_config.objective.metrics)
+                if experiment.optimization_config is not None
+                else 0
+            ),
             num_tracking_metrics=len(experiment.tracking_metrics),
-            num_outcome_constraints=len(
-                experiment.optimization_config.outcome_constraints
-            )
-            if experiment.optimization_config is not None
-            else 0,
+            num_outcome_constraints=(
+                len(experiment.optimization_config.outcome_constraints)
+                if experiment.optimization_config is not None
+                else 0
+            ),
             num_map_metrics=sum(
                 1
                 for metric in experiment.metrics.values()
@@ -142,7 +147,7 @@ class ExperimentCreatedRecord:
     @staticmethod
     def _get_param_counts_from_search_space(
         search_space: SearchSpace,
-    ) -> Tuple[int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int]:
         """
         Return counts of different types of parameters.
 
@@ -175,7 +180,7 @@ class ExperimentCreatedRecord:
                 isinstance(param, RangeParameter)
                 or (isinstance(param, ChoiceParameter) and param.is_ordered)
             )
-            and (1 < param.cardinality() <= 3)
+            and (1.0 < param.cardinality() <= 3.0)
         )
         num_int_range_parameters_medium = sum(
             1
@@ -184,7 +189,7 @@ class ExperimentCreatedRecord:
                 isinstance(param, RangeParameter)
                 or (isinstance(param, ChoiceParameter) and param.is_ordered)
             )
-            and (3 < param.cardinality() <= 7)
+            and (3.0 < param.cardinality() <= 7.0)
         )
         num_int_range_parameters_large = sum(
             1
@@ -193,7 +198,7 @@ class ExperimentCreatedRecord:
                 isinstance(param, RangeParameter)
                 or (isinstance(param, ChoiceParameter) and param.is_ordered)
             )
-            and (7 < param.cardinality() < inf)
+            and (7.0 < param.cardinality() < inf)
         )
         num_log_scale_range_parameters = sum(
             1
@@ -258,33 +263,50 @@ class ExperimentCompletedRecord:
     total_fit_time: int
     total_gen_time: int
 
+    # OptimizationConfig info which might be updated for human in the
+    # loop experiments
+    num_objectives: int
+    num_tracking_metrics: int
+    num_outcome_constraints: int  # Includes ObjectiveThresholds in MOO
+
     @classmethod
     def from_experiment(cls, experiment: Experiment) -> ExperimentCompletedRecord:
         trial_count_by_status = {
             status: len(trials)
             for status, trials in experiment.trials_by_status.items()
         }
+        ignored_statuses = {TrialStatus.STAGED, TrialStatus.CANDIDATE}
 
         model_keys = [
-            trial.generator_runs[0]._model_key for trial in experiment.trials.values()
+            [gr._model_key for gr in trial.generator_runs]
+            for trial in experiment.trials.values()
+            if trial.status not in ignored_statuses
         ]
 
         fit_time, gen_time = get_model_times(experiment=experiment)
 
         return cls(
             num_initialization_trials=sum(
-                1 for model_key in model_keys if model_key in INITIALIZATION_MODEL_STRS
+                1
+                for model_key_list in model_keys
+                if all(
+                    model_key in INITIALIZATION_MODEL_STRS
+                    for model_key in model_key_list
+                )
             ),
             num_bayesopt_trials=sum(
                 1
-                for model_key in model_keys
-                if not (
-                    model_key in INITIALIZATION_MODEL_STRS
-                    or model_key in OTHER_MODEL_STRS
+                for model_key_list in model_keys
+                if any(
+                    model_key not in INITIALIZATION_MODEL_STRS
+                    and model_key not in OTHER_MODEL_STRS
+                    for model_key in model_key_list
                 )
             ),
             num_other_trials=sum(
-                1 for model_key in model_keys if model_key in OTHER_MODEL_STRS
+                1
+                for model_key_list in model_keys
+                if all(model_key in OTHER_MODEL_STRS for model_key in model_key_list)
             ),
             num_completed_trials=trial_count_by_status[TrialStatus.COMPLETED],
             num_failed_trials=trial_count_by_status[TrialStatus.FAILED],
@@ -292,4 +314,15 @@ class ExperimentCompletedRecord:
             num_early_stopped_trials=trial_count_by_status[TrialStatus.EARLY_STOPPED],
             total_fit_time=int(fit_time),
             total_gen_time=int(gen_time),
+            num_objectives=(
+                len(experiment.optimization_config.objective.metrics)
+                if experiment.optimization_config is not None
+                else 0
+            ),
+            num_tracking_metrics=len(experiment.tracking_metrics),
+            num_outcome_constraints=(
+                len(experiment.optimization_config.outcome_constraints)
+                if experiment.optimization_config is not None
+                else 0
+            ),
         )

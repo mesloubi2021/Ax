@@ -4,8 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections.abc import Callable
 from logging import Logger
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
@@ -13,7 +16,6 @@ from ax.exceptions.core import AxError
 from ax.models.torch.botorch import (
     BotorchModel,
     get_rounding_func,
-    TAcqfConstructor,
     TBestPointRecommender,
     TModelConstructor,
     TModelPredictor,
@@ -23,14 +25,15 @@ from ax.models.torch.botorch_defaults import (
     get_and_fit_model,
     recommend_best_observed_point,
     scipy_optimizer,
+    TAcqfConstructor,
 )
 from ax.models.torch.botorch_moo_defaults import (
-    get_NEHVI,
+    get_qLogNEHVI,
     infer_objective_thresholds,
     pareto_frontier_evaluator,
     scipy_optimizer_list,
+    TFrontierEvaluator,
 )
-from ax.models.torch.frontier_utils import TFrontierEvaluator
 from ax.models.torch.utils import (
     _get_X_pending_and_observed,
     _to_inequality_constraints,
@@ -42,9 +45,10 @@ from ax.models.torch_base import TorchGenResults, TorchModel, TorchOptConfig
 from ax.utils.common.constants import Keys
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.models.model import Model
+from pyre_extensions import none_throws
 from torch import Tensor
 
 
@@ -53,14 +57,14 @@ logger: Logger = get_logger(__name__)
 # pyre-fixme[33]: Aliased annotation cannot contain `Any`.
 TOptimizerList = Callable[
     [
-        List[AcquisitionFunction],
+        list[AcquisitionFunction],
         Tensor,
-        Optional[List[Tuple[Tensor, Tensor, float]]],
-        Optional[Dict[int, float]],
+        Optional[list[tuple[Tensor, Tensor, float]]],
+        Optional[dict[int, float]],
         Optional[Callable[[Tensor], Tensor]],
         Any,
     ],
-    Tuple[Tensor, Tensor],
+    tuple[Tensor, Tensor],
 ]
 
 
@@ -138,7 +142,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
     the (linear) outcome constraints, `X_observed` are previously observed points,
     and `X_pending` are points whose evaluation is pending. `acq_function` is a
     BoTorch acquisition function crafted from these inputs. For additional
-    details on the arguments, see `get_NEHVI`.
+    details on the arguments, see `get_qLogNEHVI`.
 
     ::
 
@@ -178,11 +182,11 @@ class MultiObjectiveBotorchModel(BotorchModel):
     a tuple of tensors describing the (linear) outcome constraints.
     """
 
-    dtype: Optional[torch.dtype]
-    device: Optional[torch.device]
-    Xs: List[Tensor]
-    Ys: List[Tensor]
-    Yvars: List[Tensor]
+    dtype: torch.dtype | None
+    device: torch.device | None
+    Xs: list[Tensor]
+    Ys: list[Tensor]
+    Yvars: list[Tensor]
 
     def __init__(
         self,
@@ -193,7 +197,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
         #  AcquisitionFunction]`; used as `Callable[[Model, Tensor,
         #  Optional[Tuple[Tensor, Tensor]], Optional[Tensor], Optional[Tensor],
         #  **(Any)], AcquisitionFunction]`.
-        acqf_constructor: TAcqfConstructor = get_NEHVI,
+        acqf_constructor: TAcqfConstructor = get_qLogNEHVI,
         # pyre-fixme[9]: acqf_optimizer has type `Callable[[AcquisitionFunction,
         #  Tensor, int, Optional[Dict[int, float]], Optional[Callable[[Tensor],
         #  Tensor]], Any], Tensor]`; used as `Callable[[AcquisitionFunction, Tensor,
@@ -204,11 +208,10 @@ class MultiObjectiveBotorchModel(BotorchModel):
         best_point_recommender: TBestPointRecommender = recommend_best_observed_point,
         frontier_evaluator: TFrontierEvaluator = pareto_frontier_evaluator,
         refit_on_cv: bool = False,
-        refit_on_update: bool = True,
         warm_start_refitting: bool = False,
         use_input_warping: bool = False,
         use_loocv_pseudo_likelihood: bool = False,
-        prior: Optional[Dict[str, Any]] = None,
+        prior: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         self.model_constructor = model_constructor
@@ -220,20 +223,19 @@ class MultiObjectiveBotorchModel(BotorchModel):
         # pyre-fixme[4]: Attribute must be annotated.
         self._kwargs = kwargs
         self.refit_on_cv = refit_on_cv
-        self.refit_on_update = refit_on_update
         self.warm_start_refitting = warm_start_refitting
         self.use_input_warping = use_input_warping
         self.use_loocv_pseudo_likelihood = use_loocv_pseudo_likelihood
         self.prior = prior
-        self.model: Optional[Model] = None
+        self.model: Model | None = None
         self.Xs = []
         self.Ys = []
         self.Yvars = []
         self.dtype = None
         self.device = None
-        self.task_features: List[int] = []
-        self.fidelity_features: List[int] = []
-        self.metric_names: List[str] = []
+        self.task_features: list[int] = []
+        self.fidelity_features: list[int] = []
+        self.metric_names: list[str] = []
 
     @copy_doc(TorchModel.gen)
     def gen(
@@ -253,7 +255,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
         if (
             torch_opt_config.objective_thresholds is not None
             and torch_opt_config.objective_weights.shape[0]
-            != not_none(torch_opt_config.objective_thresholds).shape[0]
+            != none_throws(torch_opt_config.objective_thresholds).shape[0]
         ):
             raise AxError(
                 "Objective weights and thresholds most both contain an element for"
@@ -270,7 +272,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
             fixed_features=torch_opt_config.fixed_features,
         )
 
-        model = not_none(self.model)
+        model = none_throws(self.model)
         full_objective_thresholds = torch_opt_config.objective_thresholds
         full_objective_weights = torch_opt_config.objective_weights
         full_outcome_constraints = torch_opt_config.outcome_constraints
@@ -351,7 +353,7 @@ class MultiObjectiveBotorchModel(BotorchModel):
             ):
                 full_objective_thresholds = infer_objective_thresholds(
                     model=model,
-                    X_observed=not_none(X_observed),
+                    X_observed=none_throws(X_observed),
                     objective_weights=full_objective_weights,
                     outcome_constraints=full_outcome_constraints,
                     subset_idcs=idcs,

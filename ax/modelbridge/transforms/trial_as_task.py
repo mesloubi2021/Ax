@@ -4,10 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from logging import Logger
-from typing import Dict, List, Optional, TYPE_CHECKING, Union
+# pyre-strict
 
-import numpy as np
+from logging import Logger
+from typing import Optional, TYPE_CHECKING
+
 from ax.core.observation import Observation, ObservationFeatures
 from ax.core.parameter import ChoiceParameter, ParameterType
 from ax.core.search_space import RobustSearchSpace, SearchSpace
@@ -53,10 +54,10 @@ class TrialAsTask(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert observations is not None, "TrialAsTask requires observations"
         # Identify values of trial.
@@ -73,11 +74,11 @@ class TrialAsTask(Transform):
         # Get trial level map
         if config is not None and "trial_level_map" in config:
             # pyre-ignore [9]
-            trial_level_map: Dict[str, Dict[Union[int, str], Union[int, str]]] = config[
+            trial_level_map: dict[str, dict[int | str, int | str]] = config[
                 "trial_level_map"
             ]
             # Validate
-            self.trial_level_map: Dict[str, Dict[int, Union[int, str]]] = {}
+            self.trial_level_map: dict[str, dict[int, int | str]] = {}
             for _p_name, level_dict in trial_level_map.items():
                 # cast trial index as an integer
                 int_keyed_level_dict = {
@@ -98,13 +99,13 @@ class TrialAsTask(Transform):
             self.trial_level_map = {TRIAL_PARAM: {int(b): str(b) for b in trials}}
         if len(self.trial_level_map) == 1:
             level_dict = next(iter(self.trial_level_map.values()))
-            self.inverse_map: Optional[Dict[Union[int, str], int]] = {
+            self.inverse_map: dict[int | str, int] | None = {
                 v: k for k, v in level_dict.items()
             }
         else:
             self.inverse_map = None
         # Compute target values
-        self.target_values: Dict[str, Union[int, str]] = {}
+        self.target_values: dict[str, int | str] = {}
         for p_name, trial_map in self.trial_level_map.items():
             if config is not None and "target_trial" in config:
                 target_trial = int(config["target_trial"])  # pyre-ignore [6]
@@ -114,8 +115,8 @@ class TrialAsTask(Transform):
             self.target_values[p_name] = trial_map[target_trial]
 
     def transform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         for obsf in observation_features:
             if obsf.trial_index is not None:
                 for p_name, level_dict in self.trial_level_map.items():
@@ -123,6 +124,13 @@ class TrialAsTask(Transform):
                     #  typing.SupportsInt]` for 1st param but got `Optional[np.int64]`.
                     obsf.parameters[p_name] = level_dict[int(obsf.trial_index)]
                 obsf.trial_index = None
+            elif len(obsf.parameters) > 0:
+                # If the trial index is none, but the parameters are not empty
+                # perform the transform by assuming the observation is from the
+                # most recent trial. This is needed for generating trials composed
+                # of points from multiple models.
+                for p_name, level_dict in self.trial_level_map.items():
+                    obsf.parameters[p_name] = level_dict[max(level_dict)]
         return observation_features
 
     def _transform_search_space(self, search_space: SearchSpace) -> SearchSpace:
@@ -141,7 +149,7 @@ class TrialAsTask(Transform):
                 parameter_type=ParameterType.INT if is_int else ParameterType.STRING,
                 values=level_values,  # pyre-fixme [6]
                 # if all values are integers, retain the original order
-                # they are encoded in TaskEncode
+                # they are encoded in TaskChoiceToIntTaskChoice
                 is_ordered=is_int,
                 is_task=True,
                 sort_values=True,
@@ -151,12 +159,12 @@ class TrialAsTask(Transform):
         return search_space
 
     def untransform_observation_features(
-        self, observation_features: List[ObservationFeatures]
-    ) -> List[ObservationFeatures]:
+        self, observation_features: list[ObservationFeatures]
+    ) -> list[ObservationFeatures]:
         for obsf in observation_features:
             for p_name in self.trial_level_map:
                 pval = obsf.parameters.pop(p_name)
             if self.inverse_map is not None:
                 # pyre-fixme[61]: `pval` may not be initialized here.
-                obsf.trial_index = np.int64(self.inverse_map[pval])
+                obsf.trial_index = self.inverse_map[pval]
         return observation_features

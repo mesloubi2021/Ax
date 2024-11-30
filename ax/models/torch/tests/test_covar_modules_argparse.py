@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -52,7 +54,6 @@ class CovarModuleArgparseTest(TestCase):
         self.assertEqual(covar_module_argparse[DummyKernel], _argparse)
 
     def test_fallback(self) -> None:
-
         with patch.dict(covar_module_argparse.funcs, {}):
 
             @covar_module_argparse.register(Kernel)
@@ -103,7 +104,6 @@ class CovarModuleArgparseTest(TestCase):
         ]
 
         for i, botorch_model_class in enumerate([SingleTaskGP, MultiTaskGP]):
-
             covar_module_kwargs = covar_module_argparse(
                 ScaleMaternKernel,
                 botorch_model_class=botorch_model_class,
@@ -112,16 +112,16 @@ class CovarModuleArgparseTest(TestCase):
                 outputscale_prior=GammaPrior(2, 0.15),
             )
 
-            covar_module_kwargs[
-                "lengthscale_prior_concentration"
-            ] = covar_module_kwargs["lengthscale_prior"].concentration.item()
+            covar_module_kwargs["lengthscale_prior_concentration"] = (
+                covar_module_kwargs["lengthscale_prior"].concentration.item()
+            )
             covar_module_kwargs["lengthscale_prior_rate"] = covar_module_kwargs[
                 "lengthscale_prior"
             ].rate.item()
 
-            covar_module_kwargs[
-                "outputscale_prior_concentration"
-            ] = covar_module_kwargs["outputscale_prior"].concentration.item()
+            covar_module_kwargs["outputscale_prior_concentration"] = (
+                covar_module_kwargs["outputscale_prior"].concentration.item()
+            )
             covar_module_kwargs["outputscale_prior_rate"] = covar_module_kwargs[
                 "outputscale_prior"
             ].rate.item()

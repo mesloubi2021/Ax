@@ -4,14 +4,18 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 import copy
 from collections import OrderedDict
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, MutableMapping, Optional, Set, Tuple
+from logging import Logger
+from typing import Any
 
 import pandas as pd
 from ax.core.arm import Arm
@@ -23,8 +27,12 @@ from ax.core.types import (
     TModelPredict,
     TModelPredictArm,
 )
+from ax.exceptions.core import UnsupportedError
 from ax.utils.common.base import Base, SortableBase
-from ax.utils.common.typeutils import not_none
+from ax.utils.common.logger import get_logger
+from pyre_extensions import none_throws
+
+logger: Logger = get_logger(__name__)
 
 
 class GeneratorRunType(Enum):
@@ -80,24 +88,24 @@ class GeneratorRun(SortableBase):
 
     def __init__(
         self,
-        arms: List[Arm],
-        weights: Optional[List[float]] = None,
-        optimization_config: Optional[OptimizationConfig] = None,
-        search_space: Optional[SearchSpace] = None,
-        model_predictions: Optional[TModelPredict] = None,
-        best_arm_predictions: Optional[Tuple[Arm, Optional[TModelPredictArm]]] = None,
-        type: Optional[str] = None,
-        fit_time: Optional[float] = None,
-        gen_time: Optional[float] = None,
-        model_key: Optional[str] = None,
-        model_kwargs: Optional[Dict[str, Any]] = None,
-        bridge_kwargs: Optional[Dict[str, Any]] = None,
-        gen_metadata: Optional[TGenMetadata] = None,
-        model_state_after_gen: Optional[Dict[str, Any]] = None,
-        generation_step_index: Optional[int] = None,
-        candidate_metadata_by_arm_signature: Optional[
-            Dict[str, TCandidateMetadata]
-        ] = None,
+        arms: list[Arm],
+        weights: list[float] | None = None,
+        optimization_config: OptimizationConfig | None = None,
+        search_space: SearchSpace | None = None,
+        model_predictions: TModelPredict | None = None,
+        best_arm_predictions: tuple[Arm, TModelPredictArm | None] | None = None,
+        type: str | None = None,
+        fit_time: float | None = None,
+        gen_time: float | None = None,
+        model_key: str | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+        bridge_kwargs: dict[str, Any] | None = None,
+        gen_metadata: TGenMetadata | None = None,
+        model_state_after_gen: dict[str, Any] | None = None,
+        generation_step_index: int | None = None,
+        candidate_metadata_by_arm_signature: None
+        | (dict[str, TCandidateMetadata]) = None,
+        generation_node_name: str | None = None,
     ) -> None:
         """
         Inits GeneratorRun.
@@ -133,14 +141,20 @@ class GeneratorRun(SortableBase):
                 model when reinstantiating it to continue generation from it,
                 rather than to reproduce the conditions, in which this generator
                 run was created.
-            generation_step_index: Optional index of the generation step that produced
-                this generator run. Applicable only if the generator run was created
-                via a generation strategy (in which case this index should reflect the
-                index of generation step in a generation strategy) or a standalone
-                generation step (in which case this index should be ``-1``).
+            generation_step_index: Deprecated in favor of generation_node_name.
+                Optional index of the generation step that produced this generator run.
+                Applicable only if the generator run was created via a generation
+                strategy (in which case this index should reflect the index of
+                generation step in a generation strategy) or a standalone generation
+                step (in which case this index should be ``-1``).
             candidate_metadata_by_arm_signature: Optional dictionary of arm signatures
                 to model-produced candidate metadata that corresponds to that arm in
                 this generator run.
+            generation_node_name: Optional name of the generation node that produced
+                this generator run. Applicable only if the generator run was created
+                via a generation strategy (in which case this name should reflect the
+                name of the generation node in a generation strategy) or a standalone
+                generation node (in which case this name should be ``-1``).
         """
         self._arm_weight_table: OrderedDict[str, ArmWeight] = OrderedDict()
         if weights is None:
@@ -161,23 +175,15 @@ class GeneratorRun(SortableBase):
                     "one is provided."
                 )
         for arm, weight in zip(arms, weights):
-            existing_cw = self._arm_weight_table.get(arm.signature)
-            if existing_cw:
-                self._arm_weight_table[arm.signature] = ArmWeight(
-                    arm=arm, weight=existing_cw.weight + weight
-                )
-            else:
-                self._arm_weight_table[arm.signature] = ArmWeight(
-                    arm=arm, weight=weight
-                )
+            self.add_arm(arm=arm, weight=weight)
 
-        self._generator_run_type: Optional[str] = type
+        self._generator_run_type: str | None = type
         self._time_created: datetime = datetime.now()
         self._optimization_config = optimization_config
         self._search_space = search_space
         self._model_predictions = model_predictions
         self._best_arm_predictions = best_arm_predictions
-        self._index: Optional[int] = None
+        self._index: int | None = None
         self._fit_time = fit_time
         self._gen_time = gen_time
         self._model_key = model_key
@@ -207,19 +213,20 @@ class GeneratorRun(SortableBase):
             or generation_step_index >= 0  # Generation strategy
         )
         self._generation_step_index = generation_step_index
+        self._generation_node_name = generation_node_name
 
     @property
-    def arms(self) -> List[Arm]:
+    def arms(self) -> list[Arm]:
         """Returns arms generated by this run."""
         return [cw.arm for cw in self._arm_weight_table.values()]
 
     @property
-    def arm_signatures(self) -> Set[str]:
+    def arm_signatures(self) -> set[str]:
         """Returns signatures of arms generated by this run."""
         return {cw.arm.signature for cw in self._arm_weight_table.values()}
 
     @property
-    def weights(self) -> List[float]:
+    def weights(self) -> list[float]:
         """Returns weights associated with arms generated by this run."""
         return [cw.weight for cw in self._arm_weight_table.values()]
 
@@ -231,7 +238,7 @@ class GeneratorRun(SortableBase):
         return OrderedDict(zip(self.arms, self.weights))
 
     @property
-    def generator_run_type(self) -> Optional[str]:
+    def generator_run_type(self) -> str | None:
         """The type of the generator run."""
         return self._generator_run_type
 
@@ -241,7 +248,7 @@ class GeneratorRun(SortableBase):
         return self._time_created
 
     @property
-    def index(self) -> Optional[int]:
+    def index(self) -> int | None:
         """The index of this generator run within a trial's list of generator run
         structs. This field is set when the generator run is added to a trial.
         """
@@ -249,57 +256,73 @@ class GeneratorRun(SortableBase):
 
     @index.setter
     def index(self, index: int) -> None:
+        """Sets the index of this generator run within a trial's list of
+        generator runs. Cannot be changed after being set.
+        """
         if self._index is not None and self._index != index:
-            raise ValueError("Cannot change the index of a generator run once set.")
+            raise UnsupportedError(
+                "Cannot change the index of a generator run once set."
+            )
         self._index = index
 
     @property
-    def optimization_config(self) -> Optional[OptimizationConfig]:
+    def optimization_config(self) -> OptimizationConfig | None:
         """The optimization config used during generation of this run."""
         return self._optimization_config
 
     @property
-    def search_space(self) -> Optional[SearchSpace]:
+    def search_space(self) -> SearchSpace | None:
         """The search used during generation of this run."""
         return self._search_space
 
     @property
-    def model_predictions(self) -> Optional[TModelPredict]:
+    def model_predictions(self) -> TModelPredict | None:
+        """Means and covariances for the arms in this run recorded at
+        the time the run was executed.
+        """
         return self._model_predictions
 
     @property
-    def fit_time(self) -> Optional[float]:
+    def fit_time(self) -> float | None:
+        """Time taken to fit the model in seconds."""
         return self._fit_time
 
     @property
-    def gen_time(self) -> Optional[float]:
+    def gen_time(self) -> float | None:
+        """Time taken to generate in seconds."""
         return self._gen_time
 
     @property
-    def model_predictions_by_arm(self) -> Optional[Dict[str, TModelPredictArm]]:
+    def model_predictions_by_arm(self) -> dict[str, TModelPredictArm] | None:
+        """Model predictions for each arm in this run, at the time the run was
+        executed.
+        """
         if self._model_predictions is None:
             return None
 
-        predictions: Dict[str, TModelPredictArm] = {}
+        predictions: dict[str, TModelPredictArm] = {}
         for idx, cond in enumerate(self.arms):
             predictions[cond.signature] = extract_arm_predictions(
-                model_predictions=not_none(self._model_predictions), arm_idx=idx
+                model_predictions=none_throws(self._model_predictions), arm_idx=idx
             )
         return predictions
 
     @property
-    def best_arm_predictions(self) -> Optional[Tuple[Arm, Optional[TModelPredictArm]]]:
+    def best_arm_predictions(self) -> tuple[Arm, TModelPredictArm | None] | None:
+        """Best arm in this run (according to the optimization config) and its
+        optional respective model predictions.
+        """
         return self._best_arm_predictions
 
     @property
-    def gen_metadata(self) -> Optional[TGenMetadata]:
+    def gen_metadata(self) -> TGenMetadata | None:
         """Returns metadata generated by this run."""
         return self._gen_metadata
 
     @property
     def candidate_metadata_by_arm_signature(
         self,
-    ) -> Optional[Dict[str, TCandidateMetadata]]:
+    ) -> dict[str, TCandidateMetadata] | None:
         """Retrieves model-produced candidate metadata as a mapping from arm name (for
         the arm the candidate became when added to experiment) to the metadata dict.
         """
@@ -325,12 +348,14 @@ class GeneratorRun(SortableBase):
         generator_run = GeneratorRun(
             arms=[a.clone() for a in self.arms],
             weights=self.weights[:] if self.weights is not None else None,
-            optimization_config=self.optimization_config.clone()
-            if self.optimization_config is not None
-            else None,
-            search_space=self.search_space.clone()
-            if self.search_space is not None
-            else None,
+            optimization_config=(
+                self.optimization_config.clone()
+                if self.optimization_config is not None
+                else None
+            ),
+            search_space=(
+                self.search_space.clone() if self.search_space is not None else None
+            ),
             model_predictions=copy.deepcopy(self.model_predictions),
             best_arm_predictions=copy.deepcopy(self.best_arm_predictions),
             type=self.generator_run_type,
@@ -343,6 +368,7 @@ class GeneratorRun(SortableBase):
             model_state_after_gen=self._model_state_after_gen,
             generation_step_index=self._generation_step_index,
             candidate_metadata_by_arm_signature=cand_metadata,
+            generation_node_name=self._generation_node_name,
         )
         generator_run._time_created = self._time_created
         generator_run._index = self._index
@@ -360,7 +386,24 @@ class GeneratorRun(SortableBase):
         )
         return generator_run
 
+    def add_arm(self, arm: Arm, weight: float = 1.0) -> None:
+        """Adds an arm to this generator run.  This should not be used to
+        mutate generator runs that are attached to trials.
+
+        Args:
+            arm: The arm to add.
+            weight: The weight to associate with the arm.
+        """
+        existing_cw = self._arm_weight_table.get(arm.signature)
+        if existing_cw:
+            self._arm_weight_table[arm.signature] = ArmWeight(
+                arm=arm, weight=existing_cw.weight + weight
+            )
+        else:
+            self._arm_weight_table[arm.signature] = ArmWeight(arm=arm, weight=weight)
+
     def __repr__(self) -> str:
+        """String representation of a GeneratorRun."""
         class_name = self.__class__.__name__
         num_arms = len(self.arms)
         total_weight = sum(self.weights)
@@ -368,12 +411,8 @@ class GeneratorRun(SortableBase):
 
     @property
     def _unique_id(self) -> str:
+        """Unique (within a given experiment) identifier for a GeneratorRun."""
         if self.index is not None:
-            return str(self.index)
-        elif self._generation_step_index is not None:
-            return str(self._generation_step_index)
+            return str(self.index) + str(self.time_created)
         else:
-            raise ValueError(
-                "GeneratorRuns only have a unique id if attached "
-                "to a Trial or GenerationStrategy."
-            )
+            return str(self) + str(self.time_created)

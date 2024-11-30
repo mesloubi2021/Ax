@@ -4,7 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict
+# pyre-strict
+
+import json
 
 import torch
 from ax.modelbridge.base import ModelBridge
@@ -20,7 +22,7 @@ from ax.plot.feature_importances import (
 )
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_branin_experiment
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 from plotly import graph_objects as go
 
 DUMMY_CAPTION = "test_caption"
@@ -29,7 +31,7 @@ DUMMY_CAPTION = "test_caption"
 def get_modelbridge() -> ModelBridge:
     exp = get_branin_experiment(with_batch=True)
     exp.trials[0].run()
-    return Models.BOTORCH(
+    return Models.LEGACY_BOTORCH(
         # Model bridge kwargs
         experiment=exp,
         data=exp.fetch_data(),
@@ -38,13 +40,16 @@ def get_modelbridge() -> ModelBridge:
 
 # pyre-fixme[24]: Generic type `dict` expects 2 type parameters, use `typing.Dict`
 #  to avoid runtime subscripting errors.
-def get_sensitivity_values(ax_model: ModelBridge) -> Dict:
+def get_sensitivity_values(ax_model: ModelBridge) -> dict:
     """
     Compute lengscale sensitivity value for on an ax model.
 
     Returns map {'metric_name': {'parameter_name': sensitivity_value}}
     """
-    ls = ax_model.model.model.covar_module.base_kernel.lengthscale.squeeze()
+    if hasattr(ax_model.model.model.covar_module, "outputscale"):
+        ls = ax_model.model.model.covar_module.base_kernel.lengthscale.squeeze()
+    else:
+        ls = ax_model.model.model.covar_module.lengthscale.squeeze()
     if len(ls.shape) > 1:
         ls = ls.mean(dim=0)
     # pyre-fixme[16]: `float` has no attribute `detach`.
@@ -59,7 +64,7 @@ def get_sensitivity_values(ax_model: ModelBridge) -> Dict:
 
 
 class FeatureImportancesTest(TestCase):
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_FeatureImportances(self) -> None:
         model = get_modelbridge()
         # Assert that each type of plot can be constructed successfully
@@ -69,7 +74,6 @@ class FeatureImportancesTest(TestCase):
             model=model, caption=DUMMY_CAPTION
         )
         self.assertIsInstance(plot, go.Figure)
-        # pyre-fixme[16]: `Figure` has no attribute `layout`.
         self.assertEqual(len(plot.layout.annotations), 1)
         self.assertEqual(plot.layout.annotations[0].text, DUMMY_CAPTION)
         plot = plot_feature_importance_by_feature(model=model)
@@ -103,3 +107,15 @@ class FeatureImportancesTest(TestCase):
             sensitivity_values=lengthscale_sensitivity_values
         )
         self.assertIsInstance(plot, AxPlotConfig)
+        # Test sign coloring
+        plot_str = json.dumps(plot.data)
+        self.assertNotIn('"showlegend": true', plot_str)  # no legend
+        self.assertNotIn("darkorange", plot_str)  # no negative color
+        # Flip a sign
+        lengthscale_sensitivity_values["branin"]["x1"] *= -1
+        plot = plot_feature_importance_by_feature(
+            sensitivity_values=lengthscale_sensitivity_values
+        )
+        plot_str = json.dumps(plot.data)
+        self.assertIn('"showlegend": true', plot_str)  # legend
+        self.assertIn("darkorange", plot_str)  # negative color

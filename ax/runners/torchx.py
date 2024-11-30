@@ -4,16 +4,19 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import inspect
+from collections.abc import Callable, Iterable, Mapping
 
 from logging import Logger
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Set
+from typing import Any
 
 from ax.core import Trial
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.runner import Runner
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -27,7 +30,7 @@ try:
     TORCHX_TRACKER_BASE: str = "torchx_tracker_base"
 
     # Maps TorchX AppState to Ax's TrialStatus.
-    APP_STATE_TO_TRIAL_STATUS: Dict[AppState, TrialStatus] = {
+    APP_STATE_TO_TRIAL_STATUS: dict[AppState, TrialStatus] = {
         AppState.UNSUBMITTED: TrialStatus.CANDIDATE,
         AppState.SUBMITTED: TrialStatus.STAGED,
         AppState.PENDING: TrialStatus.STAGED,
@@ -114,21 +117,21 @@ try:
             self,
             tracker_base: str,
             component: Callable[..., AppDef],
-            component_const_params: Optional[Dict[str, Any]] = None,
+            component_const_params: dict[str, Any] | None = None,
             scheduler: str = "local",
-            cfg: Optional[Mapping[str, CfgVal]] = None,
+            cfg: Mapping[str, CfgVal] | None = None,
         ) -> None:
             self._component: Callable[..., AppDef] = component
             self._scheduler: str = scheduler
-            self._cfg: Optional[Mapping[str, CfgVal]] = cfg
+            self._cfg: Mapping[str, CfgVal] | None = cfg
             # need to use the same runner in case it has state
             # e.g. torchx's local_scheduler has state hence need to poll status
             # on the same scheduler instance
             self._torchx_runner: torchx_Runner = get_runner()
             self._tracker_base = tracker_base
-            self._component_const_params: Dict[str, Any] = component_const_params or {}
+            self._component_const_params: dict[str, Any] = component_const_params or {}
 
-        def run(self, trial: BaseTrial) -> Dict[str, Any]:
+        def run(self, trial: BaseTrial) -> dict[str, Any]:
             """
             Submits the trial (which maps to an AppDef) as a job
             onto the scheduler using ``torchx.runner``.
@@ -142,7 +145,7 @@ try:
                 )
 
             parameters = dict(self._component_const_params)
-            parameters.update(not_none(trial.arm).parameters)
+            parameters.update(none_throws(trial.arm).parameters)
             component_args = inspect.getfullargspec(self._component).args
             if "trial_idx" in component_args:
                 parameters["trial_idx"] = trial.index
@@ -163,8 +166,8 @@ try:
 
         def poll_trial_status(
             self, trials: Iterable[BaseTrial]
-        ) -> Dict[TrialStatus, Set[int]]:
-            trial_statuses: Dict[TrialStatus, Set[int]] = {}
+        ) -> dict[TrialStatus, set[int]]:
+            trial_statuses: dict[TrialStatus, set[int]] = {}
 
             for trial in trials:
                 app_handle: str = trial.run_metadata[TORCHX_APP_HANDLE]
@@ -177,9 +180,7 @@ try:
 
             return trial_statuses
 
-        def stop(
-            self, trial: BaseTrial, reason: Optional[str] = None
-        ) -> Dict[str, Any]:
+        def stop(self, trial: BaseTrial, reason: str | None = None) -> dict[str, Any]:
             """Kill the given trial."""
             app_handle: str = trial.run_metadata[TORCHX_APP_HANDLE]
             self._torchx_runner.stop(app_handle)

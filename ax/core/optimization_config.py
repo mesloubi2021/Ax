@@ -4,9 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from itertools import groupby
 from logging import Logger
-from typing import Dict, List, Optional
 
 from ax.core.metric import Metric
 from ax.core.objective import MultiObjective, Objective, ScalarizedObjective
@@ -23,7 +24,7 @@ from ax.utils.common.logger import get_logger
 
 logger: Logger = get_logger(__name__)
 
-TRefPoint = List[ObjectiveThreshold]
+TRefPoint = list[ObjectiveThreshold]
 
 # Sentinels for default arguments when None is a valid input
 _NO_OUTCOME_CONSTRAINTS = [
@@ -45,8 +46,8 @@ class OptimizationConfig(Base):
     def __init__(
         self,
         objective: Objective,
-        outcome_constraints: Optional[List[OutcomeConstraint]] = None,
-        risk_measure: Optional[RiskMeasure] = None,
+        outcome_constraints: list[OutcomeConstraint] | None = None,
+        risk_measure: RiskMeasure | None = None,
     ) -> None:
         """Inits OptimizationConfig.
 
@@ -56,7 +57,7 @@ class OptimizationConfig(Base):
             risk_measure: An optional risk measure, used for robust optimization.
                 Must be used with a `RobustSearchSpace`.
         """
-        constraints: List[OutcomeConstraint] = (
+        constraints: list[OutcomeConstraint] = (
             [] if outcome_constraints is None else outcome_constraints
         )
         self._validate_optimization_config(
@@ -65,8 +66,8 @@ class OptimizationConfig(Base):
             risk_measure=risk_measure,
         )
         self._objective: Objective = objective
-        self._outcome_constraints: List[OutcomeConstraint] = constraints
-        self.risk_measure: Optional[RiskMeasure] = risk_measure
+        self._outcome_constraints: list[OutcomeConstraint] = constraints
+        self.risk_measure: RiskMeasure | None = risk_measure
 
     def clone(self) -> "OptimizationConfig":
         """Make a copy of this optimization config."""
@@ -74,11 +75,9 @@ class OptimizationConfig(Base):
 
     def clone_with_args(
         self,
-        objective: Optional[Objective] = None,
-        outcome_constraints: Optional[
-            List[OutcomeConstraint]
-        ] = _NO_OUTCOME_CONSTRAINTS,
-        risk_measure: Optional[RiskMeasure] = _NO_RISK_MEASURE,
+        objective: Objective | None = None,
+        outcome_constraints: None | (list[OutcomeConstraint]) = _NO_OUTCOME_CONSTRAINTS,
+        risk_measure: RiskMeasure | None = _NO_RISK_MEASURE,
     ) -> "OptimizationConfig":
         """Make a copy of this optimization config."""
         objective = self.objective.clone() if objective is None else objective
@@ -111,25 +110,25 @@ class OptimizationConfig(Base):
         self._objective = objective
 
     @property
-    def all_constraints(self) -> List[OutcomeConstraint]:
+    def all_constraints(self) -> list[OutcomeConstraint]:
         """Get outcome constraints."""
         return self.outcome_constraints
 
     @property
-    def outcome_constraints(self) -> List[OutcomeConstraint]:
+    def outcome_constraints(self) -> list[OutcomeConstraint]:
         """Get outcome constraints."""
         return self._outcome_constraints
 
     @property
-    def metrics(self) -> Dict[str, Metric]:
+    def metrics(self) -> dict[str, Metric]:
         constraint_metrics = {
             oc.metric.name: oc.metric
-            for oc in self._outcome_constraints
+            for oc in self.all_constraints
             if not isinstance(oc, ScalarizedOutcomeConstraint)
         }
         scalarized_constraint_metrics = {
             metric.name: metric
-            for oc in self._outcome_constraints
+            for oc in self.all_constraints
             if isinstance(oc, ScalarizedOutcomeConstraint)
             for metric in oc.metrics
         }
@@ -145,7 +144,7 @@ class OptimizationConfig(Base):
         return self.objective is not None and isinstance(self.objective, MultiObjective)
 
     @outcome_constraints.setter
-    def outcome_constraints(self, outcome_constraints: List[OutcomeConstraint]) -> None:
+    def outcome_constraints(self, outcome_constraints: list[OutcomeConstraint]) -> None:
         """Set outcome constraints if valid, else raise."""
         self._validate_optimization_config(
             objective=self.objective,
@@ -157,8 +156,8 @@ class OptimizationConfig(Base):
     @staticmethod
     def _validate_optimization_config(
         objective: Objective,
-        outcome_constraints: Optional[List[OutcomeConstraint]] = None,
-        risk_measure: Optional[RiskMeasure] = None,
+        outcome_constraints: list[OutcomeConstraint] | None = None,
+        risk_measure: RiskMeasure | None = None,
     ) -> None:
         """Ensure outcome constraints are valid and the risk measure is
         compatible with the objective.
@@ -177,10 +176,8 @@ class OptimizationConfig(Base):
         if type(objective) is MultiObjective:
             # Raise error on exact equality; `ScalarizedObjective` is OK
             raise ValueError(
-                (
-                    "OptimizationConfig does not support MultiObjective. "
-                    "Use MultiObjectiveOptimizationConfig instead."
-                )
+                "OptimizationConfig does not support MultiObjective. "
+                "Use MultiObjectiveOptimizationConfig instead."
             )
         outcome_constraints = outcome_constraints or []
         # Only vaidate `outcome_constraints`
@@ -197,8 +194,8 @@ class OptimizationConfig(Base):
 
     @staticmethod
     def _validate_outcome_constraints(
-        unconstrainable_metrics: List[Metric],
-        outcome_constraints: List[OutcomeConstraint],
+        unconstrainable_metrics: list[Metric],
+        outcome_constraints: list[OutcomeConstraint],
     ) -> None:
         constraint_metrics = [
             constraint.metric.name for constraint in outcome_constraints
@@ -214,7 +211,7 @@ class OptimizationConfig(Base):
         for metric_name, constraints_itr in groupby(
             sorted_constraints, get_metric_name
         ):
-            constraints: List[OutcomeConstraint] = list(constraints_itr)
+            constraints: list[OutcomeConstraint] = list(constraints_itr)
             constraints_len = len(constraints)
             if constraints_len == 2:
                 if constraints[0].op == constraints[1].op:
@@ -264,15 +261,16 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
 
     def __init__(
         self,
-        objective: Objective,
-        outcome_constraints: Optional[List[OutcomeConstraint]] = None,
-        objective_thresholds: Optional[List[ObjectiveThreshold]] = None,
-        risk_measure: Optional[RiskMeasure] = None,
+        objective: MultiObjective | ScalarizedObjective,
+        outcome_constraints: list[OutcomeConstraint] | None = None,
+        objective_thresholds: list[ObjectiveThreshold] | None = None,
+        risk_measure: RiskMeasure | None = None,
     ) -> None:
         """Inits OptimizationConfig.
 
         Args:
-            objective: Metric+direction to use for the optimization.
+            objective: Metric+direction to use for the optimization. Should be either a
+                MultiObjective or a ScalarizedObjective.
             outcome_constraints: Constraints on metrics.
             objective_thesholds: Thresholds objectives must exceed. Used for
                 multi-objective optimization and for calculating frontiers
@@ -280,7 +278,7 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
             risk_measure: An optional risk measure, used for robust optimization.
                 Must be used with a `RobustSearchSpace`.
         """
-        constraints: List[OutcomeConstraint] = (
+        constraints: list[OutcomeConstraint] = (
             [] if outcome_constraints is None else outcome_constraints
         )
         objective_thresholds = objective_thresholds or []
@@ -290,21 +288,19 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
             objective_thresholds=objective_thresholds,
             risk_measure=risk_measure,
         )
-        self._objective: Objective = objective
-        self._outcome_constraints: List[OutcomeConstraint] = constraints
-        self._objective_thresholds: List[ObjectiveThreshold] = objective_thresholds
-        self.risk_measure: Optional[RiskMeasure] = risk_measure
+        self._objective: MultiObjective | ScalarizedObjective = objective
+        self._outcome_constraints: list[OutcomeConstraint] = constraints
+        self._objective_thresholds: list[ObjectiveThreshold] = objective_thresholds
+        self.risk_measure: RiskMeasure | None = risk_measure
 
+    # pyre-fixme[14]: Inconsistent override.
     def clone_with_args(
         self,
-        objective: Optional[Objective] = None,
-        outcome_constraints: Optional[
-            List[OutcomeConstraint]
-        ] = _NO_OUTCOME_CONSTRAINTS,
-        objective_thresholds: Optional[
-            List[ObjectiveThreshold]
-        ] = _NO_OBJECTIVE_THRESHOLDS,
-        risk_measure: Optional[RiskMeasure] = _NO_RISK_MEASURE,
+        objective: MultiObjective | ScalarizedObjective | None = None,
+        outcome_constraints: None | (list[OutcomeConstraint]) = _NO_OUTCOME_CONSTRAINTS,
+        objective_thresholds: None
+        | (list[ObjectiveThreshold]) = _NO_OBJECTIVE_THRESHOLDS,
+        risk_measure: RiskMeasure | None = _NO_RISK_MEASURE,
     ) -> "MultiObjectiveOptimizationConfig":
         """Make a copy of this optimization config."""
         objective = self.objective.clone() if objective is None else objective
@@ -330,12 +326,12 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
         )
 
     @property
-    def objective(self) -> Objective:
+    def objective(self) -> MultiObjective | ScalarizedObjective:
         """Get objective."""
         return self._objective
 
     @objective.setter
-    def objective(self, objective: Objective) -> None:
+    def objective(self, objective: MultiObjective | ScalarizedObjective) -> None:
         """Set objective if not present in outcome constraints."""
         self._validate_optimization_config(
             objective=objective,
@@ -346,38 +342,18 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
         self._objective = objective
 
     @property
-    def all_constraints(self) -> List[OutcomeConstraint]:
+    def all_constraints(self) -> list[OutcomeConstraint]:
         """Get all constraints and thresholds."""
         return self.outcome_constraints + self.objective_thresholds
 
     @property
-    def metrics(self) -> Dict[str, Metric]:
-        constraint_metrics = {
-            oc.metric.name: oc.metric
-            for oc in self.all_constraints
-            if not isinstance(oc, ScalarizedOutcomeConstraint)
-        }
-        scalarized_constraint_metrics = {
-            metric.name: metric
-            for oc in self.all_constraints
-            if isinstance(oc, ScalarizedOutcomeConstraint)
-            for metric in oc.metrics
-        }
-        objective_metrics = {metric.name: metric for metric in self.objective.metrics}
-        return {
-            **constraint_metrics,
-            **scalarized_constraint_metrics,
-            **objective_metrics,
-        }
-
-    @property
-    def objective_thresholds(self) -> List[ObjectiveThreshold]:
+    def objective_thresholds(self) -> list[ObjectiveThreshold]:
         """Get objective thresholds."""
         return self._objective_thresholds
 
     @objective_thresholds.setter
     def objective_thresholds(
-        self, objective_thresholds: List[ObjectiveThreshold]
+        self, objective_thresholds: list[ObjectiveThreshold]
     ) -> None:
         """Set outcome constraints if valid, else raise."""
         self._validate_optimization_config(
@@ -388,7 +364,7 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
         self._objective_thresholds = objective_thresholds
 
     @property
-    def objective_thresholds_dict(self) -> Dict[str, ObjectiveThreshold]:
+    def objective_thresholds_dict(self) -> dict[str, ObjectiveThreshold]:
         """Get a mapping from objective metric name to the corresponding
         threshold.
         """
@@ -397,9 +373,9 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
     @staticmethod
     def _validate_optimization_config(
         objective: Objective,
-        outcome_constraints: Optional[List[OutcomeConstraint]] = None,
-        objective_thresholds: Optional[List[ObjectiveThreshold]] = None,
-        risk_measure: Optional[RiskMeasure] = None,
+        outcome_constraints: list[OutcomeConstraint] | None = None,
+        objective_thresholds: list[ObjectiveThreshold] | None = None,
+        risk_measure: RiskMeasure | None = None,
     ) -> None:
         """Ensure outcome constraints are valid and the risk measure is
         compatible with the objective.
@@ -418,12 +394,10 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
         """
         if not isinstance(objective, (MultiObjective, ScalarizedObjective)):
             raise TypeError(
-                (
-                    "`MultiObjectiveOptimizationConfig` requires an objective "
-                    "of type `MultiObjective` or `ScalarizedObjective`. "
-                    "Use `OptimizationConfig` instead if using a "
-                    "single-metric objective."
-                )
+                "`MultiObjectiveOptimizationConfig` requires an objective "
+                "of type `MultiObjective` or `ScalarizedObjective`. "
+                "Use `OptimizationConfig` instead if using a "
+                "single-metric objective."
             )
         outcome_constraints = outcome_constraints or []
         objective_thresholds = objective_thresholds or []
@@ -455,8 +429,8 @@ class MultiObjectiveOptimizationConfig(OptimizationConfig):
 
 
 def check_objective_thresholds_match_objectives(
-    objectives_by_name: Dict[str, Objective],
-    objective_thresholds: List[ObjectiveThreshold],
+    objectives_by_name: dict[str, Objective],
+    objective_thresholds: list[ObjectiveThreshold],
 ) -> None:
     """Error if thresholds on objective_metrics bound from the wrong direction or
     if there is a mismatch between objective thresholds and objectives.

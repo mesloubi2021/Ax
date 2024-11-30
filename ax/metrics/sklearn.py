@@ -4,15 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from copy import deepcopy
 from enum import Enum
 from functools import lru_cache
 from math import sqrt
-from typing import Any, Dict, Tuple
+from typing import Any
 
-import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.arm import Arm
 from ax.core.base_trial import BaseTrial
@@ -27,19 +29,24 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 
 
 class SklearnModelType(Enum):
+    # pyre-fixme[35]: Target cannot be annotated.
     RF: str = "rf"
+    # pyre-fixme[35]: Target cannot be annotated.
     NN: str = "nn"
 
 
 class SklearnDataset(Enum):
+    # pyre-fixme[35]: Target cannot be annotated.
     DIGITS: str = "digits"
+    # pyre-fixme[35]: Target cannot be annotated.
     BOSTON: str = "boston"
+    # pyre-fixme[35]: Target cannot be annotated.
     CANCER: str = "cancer"
 
 
 @lru_cache(maxsize=8)
 # pyre-fixme[2]: Parameter must be annotated.
-def _get_data(dataset) -> Dict[str, np.ndarray]:
+def _get_data(dataset) -> dict[str, npt.NDArray]:
     """Return sklearn dataset, loading and caching if necessary."""
     if dataset is SklearnDataset.DIGITS:
         return datasets.load_digits()
@@ -155,7 +162,7 @@ class SklearnMetric(Metric):
                 MetricFetchE(message=f"Failed to fetch {self.name}", exception=e)
             )
 
-    def train_eval(self, arm: Arm) -> Tuple[float, float]:
+    def train_eval(self, arm: Arm) -> tuple[float, float]:
         """Train and evaluate model.
 
         Args:
@@ -169,7 +176,7 @@ class SklearnMetric(Metric):
         """
         data = _get_data(self.dataset)  # cached
         X, y = data["data"], data["target"]
-        params: Dict[str, Any] = deepcopy(arm.parameters)
+        params: dict[str, Any] = deepcopy(arm.parameters)
         if self.model_type == SklearnModelType.NN:
             hidden_layer_size = params.pop("hidden_layer_size", None)
             if hidden_layer_size is not None:

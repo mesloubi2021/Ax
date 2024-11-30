@@ -4,13 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import itertools
 import logging
 from functools import reduce
 from operator import mul
-from typing import Dict, List, Optional, Tuple
 
-import numpy as np
+import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
 from ax.models.discrete_base import DiscreteModel
 from ax.models.types import TConfig
@@ -50,15 +51,15 @@ class FullFactorialGenerator(DiscreteModel):
     def gen(
         self,
         n: int,
-        parameter_values: List[TParamValueList],
-        objective_weights: Optional[np.ndarray],
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        fixed_features: Optional[Dict[int, TParamValue]] = None,
-        pending_observations: Optional[List[List[TParamValueList]]] = None,
-        model_gen_options: Optional[TConfig] = None,
-    ) -> Tuple[List[TParamValueList], List[float], TGenMetadata]:
+        parameter_values: list[TParamValueList],
+        objective_weights: npt.NDArray | None,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+        fixed_features: dict[int, TParamValue] | None = None,
+        pending_observations: list[list[TParamValueList]] | None = None,
+        model_gen_options: TConfig | None = None,
+    ) -> tuple[list[TParamValueList], list[float], TGenMetadata]:
         if n != -1:
-            raise ValueError(
+            logger.warning(
                 "FullFactorialGenerator will ignore the specified value of n. "
                 "The generator automatically determines how many arms to "
                 "generate."

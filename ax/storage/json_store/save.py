@@ -4,8 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import json
-from typing import Any, Callable, Dict, Type
+from collections.abc import Callable
+from typing import Any
 
 from ax.core.experiment import Experiment
 from ax.storage.json_store.encoder import object_to_json
@@ -21,14 +24,14 @@ def save_experiment(
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_ENCODER_REGISTRY,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    class_encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    class_encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_CLASS_ENCODER_REGISTRY,
 ) -> None:
     """Save experiment to file.

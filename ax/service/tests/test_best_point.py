@@ -3,22 +3,31 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest.mock import Mock
 
 import pandas as pd
 
 from ax.core.arm import Arm
+from ax.core.batch_trial import BatchTrial
 from ax.core.data import Data
+from ax.core.generator_run import GeneratorRun
 from ax.core.optimization_config import MultiObjectiveOptimizationConfig
 from ax.core.trial import Trial
 from ax.exceptions.core import DataRequiredError
+from ax.service.utils.best_point import extract_Y_from_data
 from ax.service.utils.best_point_mixin import BestPointMixin
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
 from ax.utils.testing.core_stubs import (
+    get_arm_weights2,
+    get_arms_from_dict,
+    get_experiment_with_batch_trial,
     get_experiment_with_observations,
     get_experiment_with_trial,
 )
+from pyre_extensions import none_throws
 
 
 class TestBestPointMixin(TestCase):
@@ -32,7 +41,7 @@ class TestBestPointMixin(TestCase):
         )
         self.assertEqual(get_trace(exp), [11, 10, 9, 9, 5])
         # Same experiment with maximize via new optimization config.
-        opt_conf = not_none(exp.optimization_config).clone()
+        opt_conf = none_throws(exp.optimization_config).clone()
         opt_conf.objective.minimize = False
         self.assertEqual(get_trace(exp, opt_conf), [11, 11, 11, 15, 15])
 
@@ -95,6 +104,51 @@ class TestBestPointMixin(TestCase):
         exp = get_experiment_with_trial()
         self.assertEqual(get_trace(exp), [])
 
+        # test batch trial
+        exp = get_experiment_with_batch_trial()
+        trial = exp.trials[0]
+        exp.optimization_config.outcome_constraints[0].relative = False
+        trial.mark_running(no_runner_required=True).mark_completed()
+        df_dict = []
+        for i, arm in enumerate(trial.arms):
+            df_dict.extend(
+                [
+                    {
+                        "trial_index": 0,
+                        "metric_name": m,
+                        "arm_name": arm.name,
+                        "mean": float(i),
+                        "sem": 0.0,
+                    }
+                    for m in exp.metrics.keys()
+                ]
+            )
+        exp.attach_data(Data(df=pd.DataFrame.from_records(df_dict)))
+        self.assertEqual(get_trace(exp), [len(trial.arms) - 1])
+        # test that there is performance metric in the trace for each
+        # completed/early-stopped trial
+        trial1 = checked_cast(BatchTrial, trial).clone_to()
+        trial1.mark_abandoned(unsafe=True)
+        arms = get_arms_from_dict(get_arm_weights2())
+        trial2 = exp.new_batch_trial(GeneratorRun(arms))
+        trial2.mark_running(no_runner_required=True).mark_completed()
+        df_dict2 = []
+        for i, arm in enumerate(trial2.arms):
+            df_dict2.extend(
+                [
+                    {
+                        "trial_index": 2,
+                        "metric_name": m,
+                        "arm_name": arm.name,
+                        "mean": 10 * float(i),
+                        "sem": 0.0,
+                    }
+                    for m in exp.metrics.keys()
+                ]
+            )
+        exp.attach_data(Data(df=pd.DataFrame.from_records(df_dict2)))
+        self.assertEqual(get_trace(exp), [2, 20.0])
+
     def test_get_hypervolume(self) -> None:
         # W/ empty data.
         exp = get_experiment_with_trial()
@@ -110,7 +164,7 @@ class TestBestPointMixin(TestCase):
         )
         self.assertEqual(get_best(exp), 5)
         # Same experiment with maximize via new optimization config.
-        opt_conf = not_none(exp.optimization_config).clone()
+        opt_conf = none_throws(exp.optimization_config).clone()
         opt_conf.objective.minimize = False
         self.assertEqual(get_best(exp, opt_conf), 15)
 
@@ -120,3 +174,18 @@ class TestBestPointMixin(TestCase):
             scalarized=True,
         )
         self.assertEqual(get_best(exp), 6)
+
+    def test_extract_Y_from_data(self) -> None:
+        # Single objective, minimize.
+        exp = get_experiment_with_observations(
+            observations=[[11], [10], [9], [15], [5]], minimize=True
+        )
+        self.assertNotEqual(len(exp.lookup_data().df), 0)
+
+        if not exp.optimization_config:
+            raise TypeError("No objective")
+
+        metric_names = exp.optimization_config.objective.metric_names
+
+        output, _ = extract_Y_from_data(experiment=exp, metric_names=metric_names)
+        self.assertNotEqual(len(output), 0)

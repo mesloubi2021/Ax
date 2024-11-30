@@ -4,18 +4,25 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
+from copy import deepcopy
 from enum import Enum
+from logging import Logger
 from math import inf
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import cast, Union
 from warnings import warn
 
-from ax.core.types import TParamValue
-from ax.exceptions.core import UserInputError
+from ax.core.types import TNumeric, TParamValue, TParamValueList
+from ax.exceptions.core import AxParameterWarning, UserInputError
 from ax.utils.common.base import SortableBase
-from ax.utils.common.typeutils import not_none
+from ax.utils.common.logger import get_logger
+from pyre_extensions import assert_is_instance, none_throws
+
+logger: Logger = get_logger(__name__)
 
 # Tolerance for floating point comparisons. This is relatively permissive,
 # and allows for serializing at rather low numerical precision.
@@ -27,12 +34,23 @@ FIXED_CHOICE_PARAM_ERROR = (
     "ChoiceParameters require multiple feasible values. "
     "Please use FixedParameter instead when setting a single possible value."
 )
+REPR_FLAGS_IF_TRUE_ONLY = [
+    "is_fidelity",
+    "is_task",
+    "is_hierarchical",
+    "log_scale",
+    "logit_scale",
+]
 
 
 class ParameterType(Enum):
+    # pyre-fixme[35]: Target cannot be annotated.
     BOOL: int = 0
+    # pyre-fixme[35]: Target cannot be annotated.
     INT: int = 1
+    # pyre-fixme[35]: Target cannot be annotated.
     FLOAT: int = 2
+    # pyre-fixme[35]: Target cannot be annotated.
     STRING: int = 3
 
     @property
@@ -40,27 +58,27 @@ class ParameterType(Enum):
         return self == ParameterType.INT or self == ParameterType.FLOAT
 
 
-TParameterType = Union[Type[int], Type[float], Type[str], Type[bool]]
+TParameterType = Union[type[int], type[float], type[str], type[bool]]
 
 # pyre: PARAMETER_PYTHON_TYPE_MAP is declared to have type
 # pyre: `Dict[ParameterType, Union[Type[bool], Type[float], Type[int],
 # pyre: Type[str]]]` but is used as type `Dict[ParameterType,
 # pyre-fixme[9]: Type[Union[float, str]]]`.
-PARAMETER_PYTHON_TYPE_MAP: Dict[ParameterType, TParameterType] = {
+PARAMETER_PYTHON_TYPE_MAP: dict[ParameterType, TParameterType] = {
     ParameterType.INT: int,
     ParameterType.FLOAT: float,
     ParameterType.STRING: str,
     ParameterType.BOOL: bool,
 }
 
-SUPPORTED_PARAMETER_TYPES: Tuple[
-    Union[Type[bool], Type[float], Type[int], Type[str]], ...
+SUPPORTED_PARAMETER_TYPES: tuple[
+    type[bool] | type[float] | type[int] | type[str], ...
 ] = tuple(PARAMETER_PYTHON_TYPE_MAP.values())
 
 
 # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use `typing.Type` to
 #  avoid runtime subscripting errors.
-def _get_parameter_type(python_type: Type) -> ParameterType:
+def _get_parameter_type(python_type: type) -> ParameterType:
     """Given a Python type, retrieve corresponding Ax ``ParameterType``."""
     for param_type, py_type in PARAMETER_PYTHON_TYPE_MAP.items():
         if py_type == python_type:
@@ -71,7 +89,7 @@ def _get_parameter_type(python_type: Type) -> ParameterType:
 class Parameter(SortableBase, metaclass=ABCMeta):
     _is_fidelity: bool = False
     _name: str
-    _target_value: Optional[TParamValue] = None
+    _target_value: TParamValue = None
     _parameter_type: ParameterType
 
     def cast(self, value: TParamValue) -> TParamValue:
@@ -115,7 +133,7 @@ class Parameter(SortableBase, metaclass=ABCMeta):
         )
 
     @property
-    def target_value(self) -> Optional[TParamValue]:
+    def target_value(self) -> TParamValue:
         return self._target_value
 
     @property
@@ -127,13 +145,13 @@ class Parameter(SortableBase, metaclass=ABCMeta):
         return self._name
 
     @property
-    def dependents(self) -> Dict[TParamValue, List[str]]:
+    def dependents(self) -> dict[TParamValue, list[str]]:
         raise NotImplementedError(
             "Only choice hierarchical parameters are currently supported."
         )
 
+    # pyre-fixme[7]: Expected `Parameter` but got implicit return value of `None`.
     def clone(self) -> Parameter:
-        # pyre-fixme[7]: Expected `Parameter` but got implicit return value of `None`.
         pass
 
     @property
@@ -141,11 +159,80 @@ class Parameter(SortableBase, metaclass=ABCMeta):
         return str(self)
 
     def _base_repr(self) -> str:
-        return (
+        ret_val = (
             f"{self.__class__.__name__}("
             f"name='{self._name}', "
             f"parameter_type={self.parameter_type.name}, "
+            f"{self.domain_repr}"
         )
+
+        # Add binary flags.
+        for flag in self.available_flags:
+            val = getattr(self, flag, False)
+            if flag not in REPR_FLAGS_IF_TRUE_ONLY or (
+                flag in REPR_FLAGS_IF_TRUE_ONLY and val is True
+            ):
+                ret_val += f", {flag}={val}"
+
+        # Add target_value if one exists.
+        if self.target_value is not None:
+            tval_rep = self.target_value
+            if self.parameter_type == ParameterType.STRING:
+                tval_rep = f"'{tval_rep}'"
+            ret_val += f", target_value={tval_rep}"
+
+        return ret_val
+
+    @abstractproperty
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        pass
+
+    @property
+    def available_flags(self) -> list[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return ["is_fidelity"]
+
+    @property
+    def summary_dict(
+        self,
+    ) -> dict[str, TParamValueList | TParamValue | str | list[str]]:
+        # Assemble dict.
+        summary_dict = {
+            "name": self.name,
+            "type": self.__class__.__name__.removesuffix("Parameter"),
+            "domain": self.domain_repr,
+            "parameter_type": self.parameter_type.name.lower(),
+        }
+
+        # Extract flags.
+        flags = []
+        for flag in self.available_flags:
+            flag_val = getattr(self, flag, None)
+            flag_repr = flag.removeprefix("is_")
+            if flag == "sort_values":
+                flag_repr = "sorted"
+            if flag_val is True:
+                flags.append(flag_repr)
+            elif flag_val is False and flag not in REPR_FLAGS_IF_TRUE_ONLY:
+                flags.append("un" + flag_repr)
+
+        # Add flags, target_values, and dependents if present.
+        if flags:
+            summary_dict["flags"] = ", ".join(flags)
+        if getattr(self, "is_fidelity", False) or getattr(self, "is_task", False):
+            # pyre-fixme[6]: For 2nd argument expected `str` but got `Union[None,
+            #  bool, float, int, str]`.
+            summary_dict["target_value"] = self.target_value
+        if getattr(self, "is_hierarchical", False):
+            # pyre-fixme[6]: For 2nd argument expected `str` but got
+            #  `Dict[Union[None, bool, float, int, str], List[str]]`.
+            summary_dict["dependents"] = self.dependents
+
+        # pyre-fixme[7]: Expected `Dict[str, Union[None, List[Union[None, bool,
+        #  float, int, str]], List[str], bool, float, int, str]]` but got `Dict[str,
+        #  str]`.
+        return summary_dict
 
 
 class RangeParameter(Parameter):
@@ -159,9 +246,9 @@ class RangeParameter(Parameter):
         upper: float,
         log_scale: bool = False,
         logit_scale: bool = False,
-        digits: Optional[int] = None,
+        digits: int | None = None,
         is_fidelity: bool = False,
-        target_value: Optional[TParamValue] = None,
+        target_value: TParamValue = None,
     ) -> None:
         """Initialize RangeParameter
 
@@ -186,17 +273,16 @@ class RangeParameter(Parameter):
             )
 
         self._name = name
+        if parameter_type not in (ParameterType.INT, ParameterType.FLOAT):
+            raise UserInputError("RangeParameter type must be int or float.")
         self._parameter_type = parameter_type
         self._digits = digits
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._lower = self.cast(lower)
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._upper = self.cast(upper)
+        self._lower: TNumeric = none_throws(self.cast(lower))
+        self._upper: TNumeric = none_throws(self.cast(upper))
         self._log_scale = log_scale
         self._logit_scale = logit_scale
         self._is_fidelity = is_fidelity
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._target_value = self.cast(target_value)
+        self._target_value: TNumeric | None = self.cast(target_value)
 
         self._validate_range_param(
             parameter_type=parameter_type,
@@ -206,58 +292,54 @@ class RangeParameter(Parameter):
             logit_scale=logit_scale,
         )
 
-    def cardinality(self) -> float:
+    def cardinality(self) -> TNumeric:
         if self.parameter_type == ParameterType.FLOAT:
             return inf
 
-        return self.upper - self.lower + 1
+        return int(self.upper) - int(self.lower) + 1
 
     def _validate_range_param(
         self,
-        lower: TParamValue,
-        upper: TParamValue,
+        lower: TNumeric,
+        upper: TNumeric,
         log_scale: bool,
         logit_scale: bool,
-        parameter_type: Optional[ParameterType] = None,
+        parameter_type: ParameterType | None = None,
     ) -> None:
         if parameter_type and parameter_type not in (
             ParameterType.INT,
             ParameterType.FLOAT,
         ):
-            raise UserInputError("RangeParameter type must be int or float.")
-        # pyre-fixme[58]: `>=` is not supported for operand types `Union[None, bool,
-        #  float, int, str]` and `Union[None, bool, float, int, str]`.
+            raise UserInputError(
+                f"RangeParameter {self.name}type must be int or float."
+            )
+
+        upper = float(upper)
         if lower >= upper:
             raise UserInputError(
                 f"Upper bound of {self.name} must be strictly larger than lower."
                 f"Got: ({lower}, {upper})."
             )
-        # pyre-fixme[58]: `-` is not supported for operand types `Union[None, bool,
-        #  float, int, str]` and `Union[None, bool, float, int, str]`.
         width: float = upper - lower
         if width < 100 * EPS:
             raise UserInputError(
-                f"Parameter range ({width}) is very small and likely "
+                f"Parameter {self.name}'s range ({width}) is very small and likely "
                 "to cause numerical errors. Consider reparameterizing your "
                 "problem by scaling the parameter."
             )
         if log_scale and logit_scale:
-            raise UserInputError("Can't use both log and logit.")
-        # pyre-fixme[58]: `<=` is not supported for operand types `Union[None, bool,
-        #  float, int, str]` and `int`.
+            raise UserInputError(f"{self.name} can't use both log and logit.")
         if log_scale and lower <= 0:
-            raise UserInputError("Cannot take log when min <= 0.")
-        # pyre-fixme[58]: `<=` is not supported for operand types `Union[None, bool,
-        #  float, int, str]` and `int`.
+            raise UserInputError(f"{self.name} cannot take log when min <= 0.")
         if logit_scale and (lower <= 0 or upper >= 1):
-            raise UserInputError("Logit requires lower > 0 and upper < 1")
+            raise UserInputError(f"{self.name} logit requires lower > 0 and upper < 1")
         if not (self.is_valid_type(lower)) or not (self.is_valid_type(upper)):
             raise UserInputError(
-                f"[{lower}, {upper}] is an invalid range for this parameter."
+                f"[{lower}, {upper}] is an invalid range for {self.name}."
             )
 
     @property
-    def upper(self) -> float:
+    def upper(self) -> TNumeric:
         """Upper bound of the parameter range.
 
         Value is cast to parameter type upon set and also validated
@@ -265,8 +347,18 @@ class RangeParameter(Parameter):
         """
         return self._upper
 
+    @upper.setter
+    def upper(self, value: TNumeric) -> None:
+        self._validate_range_param(
+            lower=self.lower,
+            upper=value,
+            log_scale=self.log_scale,
+            logit_scale=self.logit_scale,
+        )
+        self._upper = none_throws(self.cast(value))
+
     @property
-    def lower(self) -> float:
+    def lower(self) -> TNumeric:
         """Lower bound of the parameter range.
 
         Value is cast to parameter type upon set and also validated
@@ -274,8 +366,18 @@ class RangeParameter(Parameter):
         """
         return self._lower
 
+    @lower.setter
+    def lower(self, value: TNumeric) -> None:
+        self._validate_range_param(
+            lower=value,
+            upper=self.upper,
+            log_scale=self.log_scale,
+            logit_scale=self.logit_scale,
+        )
+        self._lower = none_throws(self.cast(value))
+
     @property
-    def digits(self) -> Optional[int]:
+    def digits(self) -> int | None:
         """Number of digits to round values to for float type.
 
         Upper and lower bound are re-cast after this property is changed.
@@ -293,7 +395,7 @@ class RangeParameter(Parameter):
         return self._logit_scale
 
     def update_range(
-        self, lower: Optional[float] = None, upper: Optional[float] = None
+        self, lower: float | None = None, upper: float | None = None
     ) -> RangeParameter:
         """Set the range to the given values.
 
@@ -308,8 +410,8 @@ class RangeParameter(Parameter):
         if upper is None:
             upper = self._upper
 
-        cast_lower = self.cast(lower)
-        cast_upper = self.cast(upper)
+        cast_lower = none_throws(self.cast(lower))
+        cast_upper = none_throws(self.cast(upper))
         self._validate_range_param(
             lower=cast_lower,
             upper=cast_upper,
@@ -324,10 +426,8 @@ class RangeParameter(Parameter):
         self._digits = digits
 
         # Re-scale min and max to new digits definition
-        cast_lower = self.cast(self._lower)
-        cast_upper = self.cast(self._upper)
-        # pyre-fixme[58]: `>=` is not supported for operand types `Union[None, bool,
-        #  float, int, str]` and `Union[None, bool, float, int, str]`.
+        cast_lower = none_throws(self.cast(self._lower))
+        cast_upper = none_throws(self.cast(self._upper))
         if cast_lower >= cast_upper:
             raise UserInputError(
                 f"Lower bound {cast_lower} is >= upper bound {cast_upper}."
@@ -378,9 +478,7 @@ class RangeParameter(Parameter):
 
         # This might have issues with ints > 2^24
         if self.parameter_type is ParameterType.INT:
-            # pyre-fixme[6]: Expected `Union[_SupportsIndex, bytearray, bytes, str,
-            #  typing.SupportsFloat]` for 1st param but got `Union[None, float, str]`.
-            return isinstance(value, int) or float(value).is_integer()
+            return isinstance(value, int) or float(none_throws(value)).is_integer()
         return True
 
     def clone(self) -> RangeParameter:
@@ -396,33 +494,30 @@ class RangeParameter(Parameter):
             target_value=self._target_value,
         )
 
-    def cast(self, value: TParamValue) -> TParamValue:
+    def cast(self, value: TParamValue) -> TNumeric | None:
         if value is None:
             return None
         if self.parameter_type is ParameterType.FLOAT and self._digits is not None:
-            # pyre-fixme[6]: Expected `None` for 2nd param but got `Optional[int]`.
-            return round(float(value), self._digits)
-        return self.python_type(value)
+            return round(float(value), none_throws(self._digits))
+        return assert_is_instance(self.python_type(value), TNumeric)
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-        ret_val += f"range=[{self._lower}, {self._upper}]"
 
-        if self._log_scale:
-            ret_val += f", log_scale={self._log_scale}"
-
-        if self._logit_scale:
-            ret_val += f", logit_scale={self._logit_scale}"
-
-        if self._digits:
+        if self._digits is not None:
             ret_val += f", digits={self._digits}"
 
-        if self.is_fidelity:
-            ret_val += (
-                f", fidelity={self.is_fidelity}, target_value={self.target_value}"
-            )
-
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> list[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + ["log_scale", "logit_scale"]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        return f"range={[self.lower, self.upper]}"
 
 
 class ChoiceParameter(Parameter):
@@ -451,13 +546,13 @@ class ChoiceParameter(Parameter):
         self,
         name: str,
         parameter_type: ParameterType,
-        values: List[TParamValue],
-        is_ordered: Optional[bool] = None,
+        values: list[TParamValue],
+        is_ordered: bool | None = None,
         is_task: bool = False,
         is_fidelity: bool = False,
-        target_value: Optional[TParamValue] = None,
-        sort_values: Optional[bool] = None,
-        dependents: Optional[Dict[TParamValue, List[str]]] = None,
+        target_value: TParamValue = None,
+        sort_values: bool | None = None,
+        dependents: dict[TParamValue, list[str]] | None = None,
     ) -> None:
         if (is_fidelity or is_task) and (target_value is None):
             ptype = "fidelity" if is_fidelity else "task"
@@ -470,38 +565,51 @@ class ChoiceParameter(Parameter):
         self._parameter_type = parameter_type
         self._is_task = is_task
         self._is_fidelity = is_fidelity
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._target_value = self.cast(target_value)
+        self._target_value: TParamValue = self.cast(target_value)
         # A choice parameter with only one value is a FixedParameter.
         if not len(values) > 1:
             raise UserInputError(f"{self._name}({values}): {FIXED_CHOICE_PARAM_ERROR}")
-        # Cap the number of possible values
+        # Cap the number of possible values.
         if len(values) > MAX_VALUES_CHOICE_PARAM:
             raise UserInputError(
                 f"`ChoiceParameter` with more than {MAX_VALUES_CHOICE_PARAM} values "
                 "is not supported! Use a `RangeParameter` instead."
             )
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._values = self._cast_values(values)
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._is_ordered = (
+        # Remove duplicate values.
+        # Using dict to deduplicate here since set doesn't preserve order but dict does.
+        dict_values = dict.fromkeys(values)
+        if len(values) != len(dict_values):
+            warn(
+                f"Duplicate values found for ChoiceParameter {name}. "
+                "Initializing the parameter with duplicate values removed. ",
+                AxParameterWarning,
+                stacklevel=2,
+            )
+            values = list(dict_values)
+
+        if is_ordered is False and len(values) == 2:
+            is_ordered = True
+            logger.debug(
+                f"Changing `is_ordered` to `True` for `ChoiceParameter` '{name}' since "
+                "there are only two possible values.",
+                AxParameterWarning,
+                stacklevel=3,
+            )
+        self._is_ordered: bool = (
             is_ordered
             if is_ordered is not None
-            else self._get_default_bool_and_warn(param_string="is_ordered")
+            else self._get_default_is_ordered_and_warn(num_choices=len(values))
         )
         # sort_values defaults to True if the parameter is not a string
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._sort_values = (
+        self._sort_values: bool = (
             sort_values
             if sort_values is not None
-            else self._get_default_bool_and_warn(param_string="sort_values")
+            else self._get_default_sort_values_and_warn()
         )
         if self.sort_values:
-            # pyre-ignore[6]: values/self._values expects List[Union[None, bool, float,
-            # int, str]] but sorted() takes/returns
-            # List[Variable[_typeshed.SupportsLessThanT (bound to
-            # _typeshed.SupportsLessThan)]]
-            self._values = self._cast_values(sorted(values))
+            values = cast(list[TParamValue], sorted([none_throws(v) for v in values]))
+        self._values: list[TParamValue] = self._cast_values(values)
+
         if dependents:
             for value in dependents:
                 if value not in self.values:
@@ -513,14 +621,35 @@ class ChoiceParameter(Parameter):
         # that is done in `HierarchicalSearchSpace` constructor.
         self._dependents = dependents
 
-    def _get_default_bool_and_warn(self, param_string: str) -> bool:
+    def _get_default_is_ordered_and_warn(self, num_choices: int) -> bool:
+        default_bool = self._parameter_type != ParameterType.STRING or num_choices == 2
+        if self._parameter_type == ParameterType.STRING and num_choices > 2:
+            motivation = " since the parameter is a string with more than 2 choices."
+        elif num_choices == 2:
+            motivation = " since there are exactly two choices."
+        else:
+            motivation = " since the parameter is not of type string."
+        warn(
+            f'`is_ordered` is not specified for `ChoiceParameter` "{self._name}". '
+            f"Defaulting to `{default_bool}` {motivation}. To override this behavior "
+            f"(or avoid this warning), specify `is_ordered` during `ChoiceParameter` "
+            "construction. Note that choice parameters with exactly 2 choices are "
+            "always considered ordered and that the user-supplied `is_ordered` has no "
+            "effect in this particular case.",
+            AxParameterWarning,
+            stacklevel=3,
+        )
+        return default_bool
+
+    def _get_default_sort_values_and_warn(self) -> bool:
         default_bool = self._parameter_type != ParameterType.STRING
         warn(
-            f'`{param_string}` is not specified for `ChoiceParameter` "{self._name}". '
+            f'`sort_values` is not specified for `ChoiceParameter` "{self._name}". '
             f"Defaulting to `{default_bool}` for parameters of `ParameterType` "
             f"{self.parameter_type.name}. To override this behavior (or avoid this "
-            f"warning), specify `{param_string}` during `ChoiceParameter` "
-            "construction."
+            f"warning), specify `sort_values` during `ChoiceParameter` construction.",
+            AxParameterWarning,
+            stacklevel=3,
         )
         return default_bool
 
@@ -540,10 +669,10 @@ class ChoiceParameter(Parameter):
         return self._is_task
 
     @property
-    def values(self) -> List[TParamValue]:
+    def values(self) -> list[TParamValue]:
         return self._values
 
-    def set_values(self, values: List[TParamValue]) -> ChoiceParameter:
+    def set_values(self, values: list[TParamValue]) -> ChoiceParameter:
         """Set the list of allowed values for parameter.
 
         Cast all input values to the parameter type.
@@ -557,7 +686,7 @@ class ChoiceParameter(Parameter):
         self._values = self._cast_values(values)
         return self
 
-    def add_values(self, values: List[TParamValue]) -> ChoiceParameter:
+    def add_values(self, values: list[TParamValue]) -> ChoiceParameter:
         """Add input list to the set of allowed values for parameter.
 
         Cast all input values to the parameter type.
@@ -580,14 +709,14 @@ class ChoiceParameter(Parameter):
         return value in self._values
 
     @property
-    def dependents(self) -> Dict[TParamValue, List[str]]:
+    def dependents(self) -> dict[TParamValue, list[str]]:
         if not self.is_hierarchical:
             raise NotImplementedError(
                 "Only hierarchical parameters support the `dependents` property."
             )
-        return not_none(self._dependents)
+        return none_throws(self._dependents)
 
-    def _cast_values(self, values: List[TParamValue]) -> List[TParamValue]:
+    def _cast_values(self, values: list[TParamValue]) -> list[TParamValue]:
         return [self.cast(value) for value in values]
 
     def clone(self) -> ChoiceParameter:
@@ -600,31 +729,31 @@ class ChoiceParameter(Parameter):
             is_fidelity=self._is_fidelity,
             target_value=self._target_value,
             sort_values=self._sort_values,
-            dependents=self._dependents,
+            dependents=deepcopy(self._dependents),
         )
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-        ret_val += f"values={self._values}, "
-        ret_val += f"is_ordered={self._is_ordered}, "
-        ret_val += f"sort_values={self._sort_values}"
-
-        if self._is_task:
-            ret_val += f", is_task={self._is_task}"
-
-        if self._is_fidelity:
-            ret_val += f", is_fidelity={self.is_fidelity}"
-
-        if self.target_value is not None:
-            tval_rep = self.target_value
-            if self.parameter_type == ParameterType.STRING:
-                tval_rep = f"'{tval_rep}'"
-            ret_val += f", target_value={tval_rep}"
 
         if self._dependents:
             ret_val += f", dependents={self._dependents}"
 
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> list[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + [
+            "is_ordered",
+            "is_hierarchical",
+            "is_task",
+            "sort_values",
+        ]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        return f"values={self.values}"
 
 
 class FixedParameter(Parameter):
@@ -636,8 +765,8 @@ class FixedParameter(Parameter):
         parameter_type: ParameterType,
         value: TParamValue,
         is_fidelity: bool = False,
-        target_value: Optional[TParamValue] = None,
-        dependents: Optional[Dict[TParamValue, List[str]]] = None,
+        target_value: TParamValue = None,
+        dependents: dict[TParamValue, list[str]] | None = None,
     ) -> None:
         """Initialize FixedParameter
 
@@ -659,11 +788,9 @@ class FixedParameter(Parameter):
 
         self._name = name
         self._parameter_type = parameter_type
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._value = self.cast(value)
+        self._value: TParamValue = self.cast(value)
         self._is_fidelity = is_fidelity
-        # pyre-fixme[4]: Attribute must be annotated.
-        self._target_value = self.cast(target_value)
+        self._target_value: TParamValue = self.cast(target_value)
         # NOTE: We don't need to check that dependent parameters actually exist as
         # that is done in `HierarchicalSearchSpace` constructor.
         if dependents:
@@ -697,12 +824,12 @@ class FixedParameter(Parameter):
         return value == self._value
 
     @property
-    def dependents(self) -> Dict[TParamValue, List[str]]:
+    def dependents(self) -> dict[TParamValue, list[str]]:
         if not self.is_hierarchical:
             raise NotImplementedError(
                 "Only hierarchical parameters support the `dependents` property."
             )
-        return not_none(self._dependents)
+        return none_throws(self._dependents)
 
     def clone(self) -> FixedParameter:
         return FixedParameter(
@@ -716,14 +843,17 @@ class FixedParameter(Parameter):
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-
-        if self._parameter_type == ParameterType.STRING:
-            ret_val += f"value='{self._value}'"
-        else:
-            ret_val += f"value={self._value}"
-
-        if self._is_fidelity:
-            ret_val += (
-                f", fidelity={self.is_fidelity}, target_value={self.target_value}"
-            )
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> list[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + ["is_hierarchical"]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        if self._parameter_type == ParameterType.STRING:
+            return f"value='{self._value}'"
+        else:
+            return f"value={self._value}"

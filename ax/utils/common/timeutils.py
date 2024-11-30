@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections.abc import Generator
 from datetime import datetime, timedelta
 from time import time
-from typing import Generator
 
 import pandas as pd
 
@@ -50,3 +52,8 @@ def timestamps_in_range(
     while curr <= end:
         yield curr
         curr += delta
+
+
+def unixtime_to_pandas_ts(ts: float) -> pd.Timestamp:
+    """Convert float unixtime into pandas timestamp (UTC)."""
+    return pd.to_datetime(ts, unit="s")

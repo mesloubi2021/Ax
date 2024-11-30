@@ -3,13 +3,15 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, Tuple
+# pyre-strict
+
 
 import numpy as np
 from ax.core.types import TParameterization
 from ax.exceptions.core import OptimizationShouldStop
 from ax.global_stopping.strategies.base import BaseGlobalStoppingStrategy
 from ax.service.ax_client import AxClient
+from ax.service.utils.instantiation import ObjectiveProperties
 from ax.utils.common.testutils import TestCase
 from ax.utils.measurement.synthetic_functions import branin
 from ax.utils.testing.core_stubs import DummyGlobalStoppingStrategy
@@ -39,14 +41,13 @@ class TestGlobalStoppingIntegration(TestCase):
                     "bounds": [0.0, 15.0],
                 },
             ],
-            objective_name="branin",
-            minimize=True,
+            objectives={"branin": ObjectiveProperties(minimize=True)},
         )
         return ax_client
 
-    def evaluate(self, parameters: TParameterization) -> Dict[str, Tuple[float, float]]:
+    def evaluate(self, parameters: TParameterization) -> dict[str, tuple[float, float]]:
         """Evaluates the parameters for branin experiment."""
-        x = np.array([parameters.get(f"x{i+1}") for i in range(2)])
+        x = np.array([parameters.get(f"x{i + 1}") for i in range(2)])
         # pyre-fixme[7]: Expected `Dict[str, Tuple[float, float]]` but got
         #  `Dict[str, Tuple[Union[float, ndarray], float]]`.
         return {"branin": (branin(x), 0.0)}

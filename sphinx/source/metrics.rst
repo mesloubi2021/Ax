@@ -2,19 +2,11 @@
     :class: hidden-section
 
 ax.metrics
-===================================
+==========
 
 .. automodule:: ax.metrics
 .. currentmodule:: ax.metrics
 
-
-BoTorch Test Problem
-~~~~~~
-
-.. automodule:: ax.metrics.botorch_test_problem
-    :members:
-    :undoc-members:
-    :show-inheritance:
 
 Branin
 ~~~~~~
@@ -41,17 +33,9 @@ Chemistry
     :show-inheritance:
 
 Curve
-~~~~~~~~~
+~~~~~
 
 .. automodule:: ax.metrics.curve
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-Dictionary Lookup
-~~~~~~~~~
-
-.. automodule:: ax.metrics.dict_lookup
     :members:
     :undoc-members:
     :show-inheritance:
@@ -72,15 +56,6 @@ Hartmann6
     :undoc-members:
     :show-inheritance:
 
-Jenatton
-~~~~~~~~~
-
-.. automodule:: ax.metrics.jenatton
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-
 L2 Norm
 ~~~~~~~
 
@@ -98,7 +73,7 @@ Noisy Functions
     :show-inheritance:
 
 Noisy Function Map
-~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~
 
 .. automodule:: ax.metrics.noisy_function_map
     :members:
@@ -123,7 +98,7 @@ Tensorboard
 
 
 TorchX
-~~~~~~~~~~~
+~~~~~~
 
 .. automodule:: ax.metrics.torchx
     :members:

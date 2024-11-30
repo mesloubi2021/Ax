@@ -3,13 +3,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 from warnings import warn
 
-import numpy as np
+from ax.modelbridge.cross_validation import (
+    get_fit_and_std_quality_and_generalization_dict,
+)
 
 from ax.service.scheduler import get_fitted_model_bridge, Scheduler
 from ax.telemetry.common import _get_max_transformed_dimensionality
@@ -31,15 +35,15 @@ class SchedulerCreatedRecord:
     generation_strategy_created_record: GenerationStrategyCreatedRecord
 
     # SchedulerOptions info
-    scheduler_total_trials: Optional[int]
+    scheduler_total_trials: int | None
     scheduler_max_pending_trials: int
     arms_per_trial: int
-    early_stopping_strategy_cls: Optional[str]
-    global_stopping_strategy_cls: Optional[str]
+    early_stopping_strategy_cls: str | None
+    global_stopping_strategy_cls: str | None
 
     # Dimensionality of transformed SearchSpace can often be much higher due to one-hot
     # encoding of unordered ChoiceParameters
-    transformed_dimensionality: int
+    transformed_dimensionality: int | None
 
     @classmethod
     def from_scheduler(cls, scheduler: Scheduler) -> SchedulerCreatedRecord:
@@ -49,7 +53,7 @@ class SchedulerCreatedRecord:
             ),
             generation_strategy_created_record=(
                 GenerationStrategyCreatedRecord.from_generation_strategy(
-                    generation_strategy=scheduler.generation_strategy
+                    generation_strategy=scheduler.standard_generation_strategy
                 )
             ),
             scheduler_total_trials=scheduler.options.total_trials,
@@ -68,11 +72,11 @@ class SchedulerCreatedRecord:
             ),
             transformed_dimensionality=_get_max_transformed_dimensionality(
                 search_space=scheduler.experiment.search_space,
-                generation_strategy=scheduler.generation_strategy,
+                generation_strategy=scheduler.standard_generation_strategy,
             ),
         )
 
-    def flatten(self) -> Dict[str, Any]:
+    def flatten(self) -> dict[str, Any]:
         """
         Flatten into an appropriate format for logging to a tabular database.
         """
@@ -100,10 +104,12 @@ class SchedulerCompletedRecord:
     experiment_completed_record: ExperimentCompletedRecord
 
     best_point_quality: float
-    model_fit_quality: float
-    model_std_quality: float
-    model_fit_generalization: float
-    model_std_generalization: float
+    model_fit_quality: float | None
+    model_std_quality: float | None
+    model_fit_generalization: float | None
+    model_std_generalization: float | None
+
+    improvement_over_baseline: float
 
     num_metric_fetch_e_encountered: int
     num_trials_bad_due_to_err: int
@@ -112,40 +118,41 @@ class SchedulerCompletedRecord:
     def from_scheduler(cls, scheduler: Scheduler) -> SchedulerCompletedRecord:
         try:
             model_bridge = get_fitted_model_bridge(scheduler)
-            model_fit_dict = model_bridge.compute_model_fit_metrics(
-                experiment=scheduler.experiment
+            quality_and_generalizations_dict = (
+                get_fit_and_std_quality_and_generalization_dict(
+                    fitted_model_bridge=model_bridge,
+                )
             )
-            # We'd ideally log the entire `model_fit_dict` as a single model fit metric
-            # can't capture the nuances of multiple experimental metrics, but this might
-            # lead to database performance issues. So instead, we take the worst
-            # coefficient of determination as model fit quality and store the full data
-            # in Manifold (TODO).
-            model_fit_quality = min(
-                model_fit_dict["coefficient_of_determination"].values()
-            )
-            # similar for uncertainty quantification, but distance from 1 matters
-            std = list(model_fit_dict["std_of_the_standardized_error"].values())
-            model_std_quality = _model_std_quality(np.array(std))
-
         except Exception as e:
             warn("Encountered exception in computing model fit quality: " + str(e))
-            model_fit_quality = float("-inf")
-            model_std_quality = float("-inf")
+            quality_and_generalizations_dict = {
+                "model_fit_quality": None,
+                "model_std_quality": None,
+                "model_fit_generalization": None,
+                "model_std_generalization": None,
+            }
+
+        try:
+            improvement_over_baseline = scheduler.get_improvement_over_baseline()
+        except Exception as e:
+            warn(
+                "Encountered exception in computing improvement over baseline: "
+                + str(e)
+            )
+            improvement_over_baseline = float("nan")
 
         return cls(
             experiment_completed_record=ExperimentCompletedRecord.from_experiment(
                 experiment=scheduler.experiment
             ),
-            best_point_quality=float("-inf"),  # TODO[T147907632]
-            model_fit_quality=model_fit_quality,
-            model_std_quality=model_std_quality,
-            model_fit_generalization=float("-inf"),  # TODO by cross_validate_by_trial
-            model_std_generalization=float("-inf"),
+            best_point_quality=float("nan"),  # TODO[T147907632]
+            improvement_over_baseline=improvement_over_baseline,
             num_metric_fetch_e_encountered=scheduler._num_metric_fetch_e_encountered,
             num_trials_bad_due_to_err=scheduler._num_trials_bad_due_to_err,
+            **quality_and_generalizations_dict,
         )
 
-    def flatten(self) -> Dict[str, Any]:
+    def flatten(self) -> dict[str, Any]:
         """
         Flatten into an appropriate format for logging to a tabular database.
         """
@@ -157,26 +164,3 @@ class SchedulerCompletedRecord:
             **self_dict,
             **experiment_completed_record_dict,
         }
-
-
-def _model_std_quality(std: np.ndarray) -> float:
-    """Quantifies quality of the model uncertainty. A value of one means the
-    uncertainty is perfectly predictive of the true standard deviation of the error.
-    Values larger than one indicate over-estimation and negative values indicate
-    under-estimation of the true standard deviation of the error. In particular, a value
-    of 2 (resp. 1 / 2) represents an over-estimation (resp. under-estimation) of the
-    true standard deviation of the error by a factor of 2.
-
-    Args:
-        std: The standard deviation of the standardized error.
-
-    Returns:
-        The factor corresponding to the worst over- or under-estimation factor of the
-        standard deviation of the error among all experimentally observed metrics.
-    """
-    max_std, min_std = np.max(std), np.min(std)
-    # comparing worst over-estimation factor with worst under-estimation factor
-    inv_model_std_quality = max_std if max_std > 1 / min_std else min_std
-    # reciprocal so that values greater than one indicate over-estimation and
-    # values smaller than indicate underestimation of the uncertainty.
-    return 1 / inv_model_std_quality

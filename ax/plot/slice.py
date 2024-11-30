@@ -4,10 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.observation import ObservationFeatures
 from ax.modelbridge.base import ModelBridge
 from ax.plot.base import AxPlotConfig, AxPlotTypes, PlotData
@@ -21,21 +24,22 @@ from ax.plot.helper import (
     slice_config_to_trace,
     TNullableGeneratorRunsDict,
 )
-from ax.utils.common.typeutils import not_none
 from plotly import graph_objs as go
+from pyre_extensions import none_throws
 
 
 # type aliases
-SlicePredictions = Tuple[
+# pyre-fixme[24]: Generic type `np.ndarray` expects 2 type parameters.
+SlicePredictions = tuple[
     PlotData,
-    List[Dict[str, Union[str, float]]],
-    List[float],
+    list[dict[str, Union[str, float]]],
+    list[float],
     np.ndarray,
     np.ndarray,
     str,
     str,
     bool,
-    Dict[str, Optional[Union[str, bool, float, int]]],
+    dict[str, Optional[Union[str, bool, float, int]]],
     np.ndarray,
     bool,
 ]
@@ -48,9 +52,9 @@ def _get_slice_predictions(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> SlicePredictions:
     """Computes slice prediction configuration values for a single metric name.
 
@@ -130,9 +134,9 @@ def plot_slice_plotly(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> go.Figure:
     """Plot predictions for a 1-d slice of the parameter space.
 
@@ -244,9 +248,9 @@ def plot_slice(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> AxPlotConfig:
     """Plot predictions for a 1-d slice of the parameter space.
 
@@ -271,6 +275,8 @@ def plot_slice(
         AxPlotConfig: plot of objective vs. parameter value
     """
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=plot_slice_plotly(
             model=model,
             param_name=param_name,
@@ -291,9 +297,9 @@ def interact_slice_plotly(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> go.Figure:
     """Create interactive plot with predictions for a 1-d slice of the parameter
     space.
@@ -337,19 +343,19 @@ def interact_slice_plotly(
 
         plot_data_dict = {}
         raw_data_dict = {}
-        sd_plt_dict: Dict[str, Dict[str, np.ndarray]] = {}
+        sd_plt_dict: dict[str, dict[str, npt.NDArray]] = {}
 
         cond_name_to_parameters_dict = {}
-        is_log_dict: Dict[str, bool] = {}
+        is_log_dict: dict[str, bool] = {}
 
         if should_replace_slice_values:
-            slice_values = not_none(fixed_features).parameters
+            slice_values = none_throws(fixed_features).parameters
         else:
             fixed_features = ObservationFeatures(parameters={})
         fixed_values = get_fixed_values(model, slice_values, trial_index)
         prediction_features = []
         for x in grid:
-            predf = deepcopy(not_none(fixed_features))
+            predf = deepcopy(none_throws(fixed_features))
             predf.parameters = fixed_values.copy()
             predf.parameters[param_name] = x
             prediction_features.append(predf)
@@ -372,6 +378,9 @@ def interact_slice_plotly(
             raw_data_dict[metric_name] = rd
             cond_name_to_parameters_dict[metric_name] = cntp
 
+            # pyre-fixme[6]: For 2nd argument expected `Dict[str,
+            #  ndarray[typing.Any, typing.Any]]` but got `ndarray[typing.Any,
+            #  dtype[typing.Any]]`.
             sd_plt_dict[metric_name] = np.sqrt(cov[metric_name][metric_name])
             is_log_dict[metric_name] = ls
 
@@ -426,14 +435,16 @@ def interact_slice_plotly(
             pbutton_data_args["x"] += [trace["x"] for trace in traces]
             pbutton_data_args["y"] += [trace["y"] for trace in traces]
             pbutton_data_args["error_y"] += [
-                {
-                    "type": "data",
-                    "array": trace["error_y"]["array"],
-                    "visible": True,
-                    "color": "black",
-                }
-                if "error_y" in trace and "array" in trace["error_y"]
-                else []
+                (
+                    {
+                        "type": "data",
+                        "array": trace["error_y"]["array"],
+                        "visible": True,
+                        "color": "black",
+                    }
+                    if "error_y" in trace and "array" in trace["error_y"]
+                    else []
+                )
                 for trace in traces
             ]
             if first_param_bool:
@@ -463,8 +474,11 @@ def interact_slice_plotly(
 
     # Populate mbuttons, which allows the user to select which metric to plot
     mbuttons = []
+    # pyre-fixme[61]: `metrics` is undefined, or not always defined.
     for i, metric in enumerate(metrics):
+        # pyre-fixme[61]: `arm_data` is undefined, or not always defined.
         trace_cnt = 3 + len(arm_data[metric]["out_of_sample"].keys())
+        # pyre-fixme[61]: `metrics` is undefined, or not always defined.
         visible = [False] * (len(metrics) * trace_cnt)
         for j in range(i * trace_cnt, (i + 1) * trace_cnt):
             visible[j] = True
@@ -525,6 +539,7 @@ def interact_slice_plotly(
             "autorange": True,
             "tickfont": {"size": 11},
             "tickmode": "auto",
+            # pyre-fixme[61]: `metrics` is undefined, or not always defined.
             "title": metrics[0],
         },
     }
@@ -537,9 +552,9 @@ def interact_slice(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> AxPlotConfig:
     """Create interactive plot with predictions for a 1-d slice of the parameter
     space.
@@ -564,6 +579,8 @@ def interact_slice(
     """
 
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=interact_slice_plotly(
             model=model,
             generator_runs_dict=generator_runs_dict,

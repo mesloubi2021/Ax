@@ -4,13 +4,20 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections.abc import Callable
 from logging import Logger
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import Any
 
 from ax.core.runner import Runner
 from ax.runners.synthetic import SyntheticRunner
 from ax.storage.json_store.encoders import runner_to_dict
-from ax.storage.json_store.registry import CORE_DECODER_REGISTRY, CORE_ENCODER_REGISTRY
+from ax.storage.json_store.registry import (
+    CORE_DECODER_REGISTRY,
+    CORE_ENCODER_REGISTRY,
+    TDecoderRegistry,
+)
 from ax.storage.utils import stable_hash
 from ax.utils.common.logger import get_logger
 
@@ -25,29 +32,27 @@ logger: Logger = get_logger(__name__)
 # up the type field in REVERSE_RUNNER_REGISTRY, and initialize the
 # corresponding runner subclass.
 # """
-CORE_RUNNER_REGISTRY: Dict[Type[Runner], int] = {SyntheticRunner: 0}
+CORE_RUNNER_REGISTRY: dict[type[Runner], int] = {SyntheticRunner: 0}
 
 
 # pyre-fixme[3]: Return annotation cannot contain `Any`.
 def register_runner(
-    runner_cls: Type[Runner],
-    runner_registry: Dict[Type[Runner], int] = CORE_RUNNER_REGISTRY,
+    runner_cls: type[Runner],
+    runner_registry: dict[type[Runner], int] = CORE_RUNNER_REGISTRY,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_ENCODER_REGISTRY,
-    # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
-    #  `typing.Type` to avoid runtime subscripting errors.
-    decoder_registry: Dict[str, Type] = CORE_DECODER_REGISTRY,
-    val: Optional[int] = None,
+    decoder_registry: TDecoderRegistry = CORE_DECODER_REGISTRY,
+    val: int | None = None,
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use `typing.Type` to
     #  avoid runtime subscripting errors.
-) -> Tuple[
-    Dict[Type[Runner], int],
-    Dict[Type, Callable[[Any], Dict[str, Any]]],
-    Dict[str, Type],
+) -> tuple[
+    dict[type[Runner], int],
+    dict[type, Callable[[Any], dict[str, Any]]],
+    TDecoderRegistry,
 ]:
     """Add a custom runner class to the SQA and JSON registries.
     For the SQA registry, if no int is specified, use a hash of the class name.
@@ -63,32 +68,28 @@ def register_runner(
 
 # pyre-fixme[3]: Return annotation cannot contain `Any`.
 def register_runners(
-    runner_clss: Dict[Type[Runner], Optional[int]],
-    runner_registry: Dict[Type[Runner], int] = CORE_RUNNER_REGISTRY,
+    runner_clss: dict[type[Runner], int | None],
+    runner_registry: dict[type[Runner], int] = CORE_RUNNER_REGISTRY,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_ENCODER_REGISTRY,
-    # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
-    #  `typing.Type` to avoid runtime subscripting errors.
-    decoder_registry: Dict[str, Type] = CORE_DECODER_REGISTRY,
+    decoder_registry: TDecoderRegistry = CORE_DECODER_REGISTRY,
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use `typing.Type` to
     #  avoid runtime subscripting errors.
-) -> Tuple[
-    Dict[Type[Runner], int],
-    Dict[Type, Callable[[Any], Dict[str, Any]]],
-    Dict[str, Type],
+) -> tuple[
+    dict[type[Runner], int],
+    dict[type, Callable[[Any], dict[str, Any]]],
+    TDecoderRegistry,
 ]:
     """Add custom runner classes to the SQA and JSON registries.
     For the SQA registry, if no int is specified, use a hash of the class name.
     """
     new_runner_registry = {
         **{
-            runner_cls: val
-            if val
-            else abs(stable_hash(runner_cls.__name__)) % (10**5)
+            runner_cls: val if val else abs(stable_hash(runner_cls.__name__)) % (10**5)
             for runner_cls, val in runner_clss.items()
         },
         **runner_registry,

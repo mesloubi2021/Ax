@@ -4,23 +4,19 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
+import warnings
+
 from collections import defaultdict, OrderedDict
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from logging import Logger
-from typing import (
-    DefaultDict,
-    Dict,
-    List,
-    MutableMapping,
-    Optional,
-    Set,
-    TYPE_CHECKING,
-    Union,
-)
+from typing import TYPE_CHECKING
 
 import numpy as np
 from ax.core.arm import Arm
@@ -33,13 +29,13 @@ from ax.core.types import (
     TEvaluationOutcome,
     validate_evaluation_outcome,
 )
-from ax.exceptions.core import AxError, UserInputError
+from ax.exceptions.core import AxError, UnsupportedError, UserInputError
 from ax.utils.common.base import SortableBase
 from ax.utils.common.docutils import copy_doc
 from ax.utils.common.equality import datetime_equals, equality_typechecker
 from ax.utils.common.logger import _round_floats_for_logging, get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
-
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -69,7 +65,7 @@ class AbandonedArm(SortableBase):
 
     name: str
     time: datetime
-    reason: Optional[str] = None
+    reason: str | None = None
 
     @equality_typechecker
     def __eq__(self, other: AbandonedArm) -> bool:
@@ -116,6 +112,10 @@ class BatchTrial(BaseTrial):
         generator_run: GeneratorRun, associated with this trial. This can a
             also be set later through `add_arm` or `add_generator_run`, but a
             trial's associated generator run is immutable once set.
+        generator_runs: GeneratorRuns, associated with this trial. This can a
+            also be set later through `add_arm` or `add_generator_run`, but a
+            trial's associated generator run is immutable once set.  This cannot
+            be combined with the `generator_run` argument.
         trial_type: Type of this trial, if used in MultiTypeExperiment.
         optimize_for_power: Whether to optimize the weights of arms in this
             trial such that the experiment's power to detect effects of
@@ -138,12 +138,13 @@ class BatchTrial(BaseTrial):
     def __init__(
         self,
         experiment: core.experiment.Experiment,
-        generator_run: Optional[GeneratorRun] = None,
-        trial_type: Optional[str] = None,
-        optimize_for_power: Optional[bool] = False,
-        ttl_seconds: Optional[int] = None,
-        index: Optional[int] = None,
-        lifecycle_stage: Optional[LifecycleStage] = None,
+        generator_run: GeneratorRun | None = None,
+        generator_runs: list[GeneratorRun] | None = None,
+        trial_type: str | None = None,
+        optimize_for_power: bool | None = False,
+        ttl_seconds: int | None = None,
+        index: int | None = None,
+        lifecycle_stage: LifecycleStage | None = None,
     ) -> None:
         super().__init__(
             experiment=experiment,
@@ -151,13 +152,20 @@ class BatchTrial(BaseTrial):
             ttl_seconds=ttl_seconds,
             index=index,
         )
-        self._arms_by_name: Dict[str, Arm] = {}
-        self._generator_run_structs: List[GeneratorRunStruct] = []
-        self._abandoned_arms_metadata: Dict[str, AbandonedArm] = {}
-        self._status_quo: Optional[Arm] = None
-        self._status_quo_weight_override: Optional[float] = None
+        self._arms_by_name: dict[str, Arm] = {}
+        self._generator_run_structs: list[GeneratorRunStruct] = []
+        self._abandoned_arms_metadata: dict[str, AbandonedArm] = {}
+        self._status_quo: Arm | None = None
+        self._status_quo_weight_override: float | None = None
         if generator_run is not None:
+            if generator_runs is not None:
+                raise UnsupportedError(
+                    "Cannot specify both `generator_run` and `generator_runs`."
+                )
             self.add_generator_run(generator_run=generator_run)
+        elif generator_runs is not None:
+            for gr in generator_runs:
+                self.add_generator_run(generator_run=gr)
 
         self.optimize_for_power = optimize_for_power
         status_quo = experiment.status_quo
@@ -175,8 +183,8 @@ class BatchTrial(BaseTrial):
         # Trial status quos are stored in the DB as a generator run
         # with one arm; thus we need to store two `db_id` values
         # for this object instead of one
-        self._status_quo_generator_run_db_id: Optional[int] = None
-        self._status_quo_arm_db_id: Optional[int] = None
+        self._status_quo_generator_run_db_id: int | None = None
+        self._status_quo_arm_db_id: int | None = None
         self._lifecycle_stage = lifecycle_stage
 
     @property
@@ -190,7 +198,7 @@ class BatchTrial(BaseTrial):
         return self._index
 
     @property
-    def generator_run_structs(self) -> List[GeneratorRunStruct]:
+    def generator_run_structs(self) -> list[GeneratorRunStruct]:
         """List of generator run structs attached to this trial.
 
         Struct holds generator_run object and the weight with which it was added.
@@ -223,7 +231,7 @@ class BatchTrial(BaseTrial):
         return arm_weights
 
     @property
-    def lifecycle_stage(self) -> Optional[LifecycleStage]:
+    def lifecycle_stage(self) -> LifecycleStage | None:
         return self._lifecycle_stage
 
     @arm_weights.setter
@@ -246,8 +254,8 @@ class BatchTrial(BaseTrial):
     @immutable_once_run
     def add_arms_and_weights(
         self,
-        arms: List[Arm],
-        weights: Optional[List[float]] = None,
+        arms: list[Arm],
+        weights: list[float] | None = None,
         multiplier: float = 1.0,
     ) -> BatchTrial:
         """Add arms and weights to the trial.
@@ -310,7 +318,9 @@ class BatchTrial(BaseTrial):
         generator_run.index = len(self._generator_run_structs) - 1
 
         if self.status_quo is not None and self.optimize_for_power:
-            self.set_status_quo_and_optimize_power(status_quo=not_none(self.status_quo))
+            self.set_status_quo_and_optimize_power(
+                status_quo=none_throws(self.status_quo)
+            )
 
         if generator_run._generation_step_index is not None:
             self._set_generation_step_index(
@@ -320,12 +330,12 @@ class BatchTrial(BaseTrial):
         return self
 
     @property
-    def status_quo(self) -> Optional[Arm]:
+    def status_quo(self) -> Arm | None:
         """The control arm for this batch."""
         return self._status_quo
 
     @status_quo.setter
-    def status_quo(self, status_quo: Optional[Arm]) -> None:
+    def status_quo(self, status_quo: Arm | None) -> None:
         raise NotImplementedError(
             "Use `set_status_quo_with_weight` or "
             "`set_status_quo_and_optimize_power` "
@@ -335,25 +345,33 @@ class BatchTrial(BaseTrial):
     def unset_status_quo(self) -> None:
         """Set the status quo to None."""
         self._status_quo = None
+        self._status_quo_weight_override = None
         self._refresh_arms_by_name()
 
     @immutable_once_run
-    def set_status_quo_with_weight(self, status_quo: Arm, weight: float) -> BatchTrial:
+    def set_status_quo_with_weight(
+        self, status_quo: Arm, weight: float | None
+    ) -> BatchTrial:
         """Sets status quo arm with given weight. This weight *overrides* any
         weight the status quo has from generator runs attached to this batch.
         Thus, this function is not the same as using add_arm, which will
         result in the weight being additive over all generator runs.
         """
         # Assign a name to this arm if none exists
-        if weight is not None and weight <= 0.0:
-            raise ValueError("Status quo weight must be positive.")
+        if weight is not None:
+            if weight <= 0.0:
+                raise ValueError("Status quo weight must be positive.")
+            if status_quo is None:
+                raise ValueError("Cannot set weight because status quo is not defined.")
 
         if status_quo is not None:
             self.experiment.search_space.check_types(
                 status_quo.parameters, raise_error=True
             )
             self.experiment._name_and_store_arm_if_not_exists(
-                arm=status_quo, proposed_name="status_quo_" + str(self.index)
+                arm=status_quo,
+                proposed_name="status_quo_" + str(self.index),
+                replace=True,
             )
         self._status_quo = status_quo.clone() if status_quo is not None else None
         self._status_quo_weight_override = weight
@@ -388,7 +406,7 @@ class BatchTrial(BaseTrial):
             return self
 
         # arm_weights should always have at least one arm now
-        arm_weights = not_none(self.arm_weights)
+        arm_weights = none_throws(self.arm_weights)
         sum_weights = sum(w for arm, w in arm_weights.items() if arm != status_quo)
         optimal_status_quo_weight_override = np.sqrt(sum_weights)
         self.set_status_quo_with_weight(
@@ -397,19 +415,19 @@ class BatchTrial(BaseTrial):
         return self
 
     @property
-    def arms(self) -> List[Arm]:
+    def arms(self) -> list[Arm]:
         """All arms contained in the trial."""
         arm_weights = self.arm_weights
         return [] if arm_weights is None else list(arm_weights.keys())
 
     @property
-    def weights(self) -> List[float]:
+    def weights(self) -> list[float]:
         """Weights corresponding to arms contained in the trial."""
         arm_weights = self.arm_weights
         return [] if arm_weights is None else list(arm_weights.values())
 
     @property
-    def arms_by_name(self) -> Dict[str, Arm]:
+    def arms_by_name(self) -> dict[str, Arm]:
         """Map from arm name to object for all arms in trial."""
         return self._arms_by_name
 
@@ -421,7 +439,7 @@ class BatchTrial(BaseTrial):
             self._arms_by_name[arm.name] = arm
 
     @property
-    def abandoned_arms(self) -> List[Arm]:
+    def abandoned_arms(self) -> list[Arm]:
         """List of arms that have been abandoned within this trial."""
         return [
             self.arms_by_name[arm.name]
@@ -429,12 +447,12 @@ class BatchTrial(BaseTrial):
         ]
 
     @property
-    def abandoned_arm_names(self) -> Set[str]:
+    def abandoned_arm_names(self) -> set[str]:
         """Set of names of arms that have been abandoned within this trial."""
         return set(self._abandoned_arms_metadata.keys())
 
     @property
-    def in_design_arms(self) -> List[Arm]:
+    def in_design_arms(self) -> list[Arm]:
         return [
             arm
             for arm in self.arms
@@ -444,11 +462,11 @@ class BatchTrial(BaseTrial):
     # pyre-ignore[6]: T77111662.
     @copy_doc(BaseTrial.generator_runs)
     @property
-    def generator_runs(self) -> List[GeneratorRun]:
+    def generator_runs(self) -> list[GeneratorRun]:
         return [grs.generator_run for grs in self.generator_run_structs]
 
     @property
-    def abandoned_arms_metadata(self) -> List[AbandonedArm]:
+    def abandoned_arms_metadata(self) -> list[AbandonedArm]:
         return list(self._abandoned_arms_metadata.values())
 
     @property
@@ -462,13 +480,10 @@ class BatchTrial(BaseTrial):
         sufficient_factors = all(len(arm.parameters or []) >= 2 for arm in self.arms)
         if not sufficient_factors:
             return False
-        param_levels: DefaultDict[str, Dict[Union[str, float], int]] = defaultdict(dict)
+        param_levels: defaultdict[str, dict[str | float, int]] = defaultdict(dict)
         for arm in self.arms:
             for param_name, param_value in arm.parameters.items():
-                # Expected `Union[float, str]` for 2nd anonymous parameter to call
-                # `dict.__setitem__` but got `Optional[Union[bool, float, str]]`.
-                # pyre-fixme[6]: Expected `Union[float, str]` for 1st param but got `...
-                param_levels[param_name][param_value] = 1
+                param_levels[param_name][none_throws(param_value)] = 1
         param_cardinality = 1
         for param_values in param_levels.values():
             param_cardinality *= len(param_values)
@@ -478,7 +493,7 @@ class BatchTrial(BaseTrial):
         return checked_cast(BatchTrial, super().run())
 
     def normalized_arm_weights(
-        self, total: float = 1, trunc_digits: Optional[int] = None
+        self, total: float = 1, trunc_digits: int | None = None
     ) -> MutableMapping[Arm, float]:
         """Returns arms with a new set of weights normalized
         to the given total.
@@ -502,7 +517,6 @@ class BatchTrial(BaseTrial):
         weights = np.array(self.weights)
         if trunc_digits is not None:
             atomic_weight = 10**-trunc_digits
-            # pyre-fixme[16]: `float` has no attribute `astype`.
             int_weights = (
                 (total / atomic_weight) * (weights / np.sum(weights))
             ).astype(int)
@@ -514,7 +528,7 @@ class BatchTrial(BaseTrial):
         return OrderedDict(zip(self.arms, weights))
 
     def mark_arm_abandoned(
-        self, arm_name: str, reason: Optional[str] = None
+        self, arm_name: str, reason: str | None = None
     ) -> BatchTrial:
         """Mark a arm abandoned.
 
@@ -542,23 +556,57 @@ class BatchTrial(BaseTrial):
         return self
 
     def clone(self) -> BatchTrial:
-        """Clone the trial.
+        """Clone the trial and attach it to the current experiment."""
+        warnings.warn(
+            "clone() method is getting deprecated. Please use clone_to() instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return self.clone_to(include_sq=False)
+
+    def clone_to(
+        self,
+        experiment: core.experiment.Experiment | None = None,
+        include_sq: bool = True,
+    ) -> BatchTrial:
+        """Clone the trial and attach it to a specified experiment.
+        If None provided, attach it to the current experiment.
+
+        Args:
+            experiment: The experiment to which the cloned trial will belong.
+                If unspecified, uses the current experiment.
+            include_sq: Whether to include status quo in the cloned trial.
 
         Returns:
             A new instance of the trial.
         """
-        new_trial = self._experiment.new_batch_trial()
+        use_old_experiment = experiment is None
+        experiment = self._experiment if experiment is None else experiment
+        new_trial = experiment.new_batch_trial(
+            trial_type=self._trial_type, ttl_seconds=self._ttl_seconds
+        )
         for struct in self._generator_run_structs:
-            new_trial.add_generator_run(struct.generator_run, struct.weight)
-        new_trial.trial_type = self._trial_type
-        new_trial.runner = self._runner
+            if use_old_experiment:
+                # don't clone gen run in case we are attaching cloned trial to
+                # the same experiment
+                new_trial.add_generator_run(struct.generator_run, struct.weight)
+            else:
+                new_trial.add_generator_run(struct.generator_run.clone(), struct.weight)
+
+        if (self._status_quo is not None) and include_sq:
+            sq_weight = self._status_quo_weight_override
+            new_trial.set_status_quo_with_weight(
+                self._status_quo.clone(),
+                weight=sq_weight,
+            )
+        self._update_trial_attrs_on_clone(new_trial=new_trial)
         return new_trial
 
     def attach_batch_trial_data(
         self,
-        raw_data: Dict[str, TEvaluationOutcome],
-        sample_sizes: Optional[Dict[str, int]] = None,
-        metadata: Optional[Dict[str, Union[str, int]]] = None,
+        raw_data: dict[str, TEvaluationOutcome],
+        sample_sizes: dict[str, int] | None = None,
+        metadata: dict[str, str | int] | None = None,
     ) -> None:
         """Attaches data to the trial
 
@@ -595,7 +643,7 @@ class BatchTrial(BaseTrial):
         )
         self._validate_batch_trial_data(data=data)
 
-        self._run_metadata = metadata or {}
+        self._run_metadata = self._run_metadata if metadata is None else metadata
         self.experiment.attach_data(data)
 
         data_for_logging = _round_floats_for_logging(item=evaluations)
@@ -615,7 +663,7 @@ class BatchTrial(BaseTrial):
 
     def _get_candidate_metadata_from_all_generator_runs(
         self,
-    ) -> Dict[str, TCandidateMetadata]:
+    ) -> dict[str, TCandidateMetadata]:
         """Retrieves combined candidate metadata from all generator runs on this
         batch trial in the form of { arm name -> candidate metadata} mapping.
 
@@ -656,7 +704,7 @@ class BatchTrial(BaseTrial):
         for gr_struct in self._generator_run_structs:
             gr = gr_struct.generator_run
             if gr and gr.candidate_metadata_by_arm_signature and arm in gr.arms:
-                return not_none(gr.candidate_metadata_by_arm_signature).get(
+                return none_throws(gr.candidate_metadata_by_arm_signature).get(
                     arm.signature
                 )
         return None
@@ -665,8 +713,8 @@ class BatchTrial(BaseTrial):
         """Utility function to validate batch data before further processing."""
         if (
             self.status_quo
-            and not_none(self.status_quo).name in self.arms_by_name
-            and not_none(self.status_quo).name not in data.df["arm_name"].values
+            and none_throws(self.status_quo).name in self.arms_by_name
+            and none_throws(self.status_quo).name not in data.df["arm_name"].values
         ):
             raise AxError(
                 f"Trial #{self.index} was completed with data that did "

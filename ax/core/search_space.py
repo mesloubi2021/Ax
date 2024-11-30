@@ -8,14 +8,17 @@
 
 from __future__ import annotations
 
+import math
 import warnings
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field
 from functools import reduce
 from logging import Logger
 from random import choice, uniform
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Sequence
 
-import numpy as np
+import numpy.typing as npt
+import pandas as pd
 from ax import core
 from ax.core.arm import Arm
 from ax.core.parameter import (
@@ -33,14 +36,24 @@ from ax.core.parameter_constraint import (
 )
 from ax.core.parameter_distribution import ParameterDistribution
 from ax.core.types import TParameterization
-from ax.exceptions.core import UnsupportedError, UserInputError
+from ax.exceptions.core import AxWarning, UnsupportedError, UserInputError
 from ax.utils.common.base import Base
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
+from scipy.special import expit, logit
 
 
 logger: Logger = get_logger(__name__)
+PARAMETER_DF_COLNAMES: Mapping[Hashable, str] = {
+    "name": "Name",
+    "type": "Type",
+    "domain": "Domain",
+    "parameter_type": "Datatype",
+    "flags": "Flags",
+    "target_value": "Target Value",
+    "dependents": "Dependent Parameters",
+}
 
 
 class SearchSpace(Base):
@@ -54,8 +67,8 @@ class SearchSpace(Base):
 
     def __init__(
         self,
-        parameters: List[Parameter],
-        parameter_constraints: Optional[List[ParameterConstraint]] = None,
+        parameters: list[Parameter],
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         """Initialize SearchSpace
 
@@ -66,7 +79,7 @@ class SearchSpace(Base):
         if len({p.name for p in parameters}) < len(parameters):
             raise ValueError("Parameter names must be unique.")
 
-        self._parameters: Dict[str, Parameter] = {p.name: p for p in parameters}
+        self._parameters: dict[str, Parameter] = {p.name: p for p in parameters}
         self.set_parameter_constraints(parameter_constraints or [])
 
     @property
@@ -78,15 +91,15 @@ class SearchSpace(Base):
         return isinstance(self, RobustSearchSpace)
 
     @property
-    def parameters(self) -> Dict[str, Parameter]:
+    def parameters(self) -> dict[str, Parameter]:
         return self._parameters
 
     @property
-    def parameter_constraints(self) -> List[ParameterConstraint]:
+    def parameter_constraints(self) -> list[ParameterConstraint]:
         return self._parameter_constraints
 
     @property
-    def range_parameters(self) -> Dict[str, Parameter]:
+    def range_parameters(self) -> dict[str, RangeParameter]:
         return {
             name: parameter
             for name, parameter in self.parameters.items()
@@ -94,7 +107,7 @@ class SearchSpace(Base):
         }
 
     @property
-    def tunable_parameters(self) -> Dict[str, Parameter]:
+    def tunable_parameters(self) -> dict[str, Parameter]:
         return {
             name: parameter
             for name, parameter in self.parameters.items()
@@ -110,13 +123,13 @@ class SearchSpace(Base):
         )
 
     def add_parameter_constraints(
-        self, parameter_constraints: List[ParameterConstraint]
+        self, parameter_constraints: list[ParameterConstraint]
     ) -> None:
         self._validate_parameter_constraints(parameter_constraints)
         self._parameter_constraints.extend(parameter_constraints)
 
     def set_parameter_constraints(
-        self, parameter_constraints: List[ParameterConstraint]
+        self, parameter_constraints: list[ParameterConstraint]
     ) -> None:
         # Validate that all parameters in constraints are in search
         # space already.
@@ -136,7 +149,7 @@ class SearchSpace(Base):
                 for idx, parameter in enumerate(constraint.parameters):
                     constraint.parameters[idx] = self.parameters[parameter.name]
 
-        self._parameter_constraints: List[ParameterConstraint] = parameter_constraints
+        self._parameter_constraints: list[ParameterConstraint] = parameter_constraints
 
     def add_parameter(self, parameter: Parameter) -> None:
         if parameter.name in self.parameters.keys():
@@ -228,8 +241,7 @@ class SearchSpace(Base):
 
         # parameter constraints only accept numeric parameters
         numerical_param_dict = {
-            # pyre-fixme[6]: Expected `typing.Union[...oat]` but got `unknown`.
-            name: float(value)
+            name: float(none_throws(value))
             for name, value in parameterization.items()
             if self.parameters[name].is_numeric
         }
@@ -246,6 +258,7 @@ class SearchSpace(Base):
         self,
         parameterization: TParameterization,
         allow_none: bool = True,
+        allow_extra_params: bool = True,
         raise_error: bool = False,
     ) -> bool:
         """Checks that the given parameterization's types match the search space.
@@ -253,6 +266,7 @@ class SearchSpace(Base):
         Args:
             parameterization: Dict from parameter name to value to validate.
             allow_none: Whether None is a valid parameter value.
+            allow_extra_params: If parameterization can have params not in search space.
             raise_error: If true and parameterization does not belong, raises an error
                 with detailed explanation of why.
 
@@ -261,9 +275,12 @@ class SearchSpace(Base):
         """
         for name, value in parameterization.items():
             if name not in self.parameters:
-                if raise_error:
+                if allow_extra_params:
+                    continue
+                elif raise_error:
                     raise ValueError(f"Parameter {name} not defined in search space")
-                return False
+                else:
+                    return False
 
             if value is None and allow_none:
                 continue
@@ -314,7 +331,7 @@ class SearchSpace(Base):
         return self.construct_arm()
 
     def construct_arm(
-        self, parameters: Optional[TParameterization] = None, name: Optional[str] = None
+        self, parameters: TParameterization | None = None, name: str | None = None
     ) -> Arm:
         """Construct new arm using given parameters and name. Any missing parameters
         fallback to the experiment defaults, represented as None.
@@ -331,7 +348,7 @@ class SearchSpace(Base):
                     raise ValueError(
                         f"`{p_value}` is not a valid value for parameter {p_name}."
                     )
-            final_parameters.update(not_none(parameters))
+            final_parameters.update(none_throws(parameters))
         return Arm(parameters=final_parameters, name=name)
 
     def clone(self) -> SearchSpace:
@@ -341,7 +358,7 @@ class SearchSpace(Base):
         )
 
     def _validate_parameter_constraints(
-        self, parameter_constraints: List[ParameterConstraint]
+        self, parameter_constraints: list[ParameterConstraint]
     ) -> None:
         for constraint in parameter_constraints:
             if isinstance(constraint, OrderConstraint) or isinstance(
@@ -395,17 +412,45 @@ class SearchSpace(Base):
         """Make the class hashable to support grouping of GeneratorRuns."""
         return hash(repr(self))
 
+    @property
+    def summary_df(self) -> pd.DataFrame:
+        """Creates a dataframe with information about each parameter in the given
+        search space. The resulting dataframe has one row per parameter, and the
+        following columns:
+            - Name: the name of the parameter.
+            - Type: the parameter subclass (Fixed, Range, Choice).
+            - Domain: the parameter's domain (e.g., "range=[0, 1]" or
+              "values=['a', 'b']").
+            - Datatype: the datatype of the parameter (int, float, str, bool).
+            - Flags: flags associated with the parameter, if any.
+            - Target Value: the target value of the parameter, if applicable.
+            - Dependent Parameters: for parameters in hierarchical search spaces,
+            mapping from parameter value -> list of dependent parameter names.
+        """
+        records = [p.summary_dict for p in self.parameters.values()]
+        df = pd.DataFrame(records).fillna(value="None")
+        df.rename(columns=PARAMETER_DF_COLNAMES, inplace=True)
+        # Reorder columns.
+        df = df[
+            [
+                colname
+                for colname in PARAMETER_DF_COLNAMES.values()
+                if colname in df.columns
+            ]
+        ]
+        return df
+
 
 class HierarchicalSearchSpace(SearchSpace):
     def __init__(
         self,
-        parameters: List[Parameter],
-        parameter_constraints: Optional[List[ParameterConstraint]] = None,
+        parameters: list[Parameter],
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         super().__init__(
             parameters=parameters, parameter_constraints=parameter_constraints
         )
-        self._all_parameter_names: Set[str] = set(self.parameters.keys())
+        self._all_parameter_names: set[str] = set(self.parameters.keys())
         self._root: Parameter = self._find_root()
         self._validate_hierarchical_structure()
         logger.debug(f"Found root: {self.root}.")
@@ -459,6 +504,7 @@ class HierarchicalSearchSpace(SearchSpace):
         self,
         observation_features: core.observation.ObservationFeatures,
         inject_dummy_values_to_complete_flat_parameterization: bool = False,
+        use_random_dummy_values: bool = False,
     ) -> core.observation.ObservationFeatures:
         """Flatten observation features that were previously cast to the hierarchical
         structure of the given search space; return the newly flattened observation
@@ -470,40 +516,53 @@ class HierarchicalSearchSpace(SearchSpace):
             observation_features: Observation features corresponding to one point
                 to flatten.
             inject_dummy_values_to_complete_flat_parameterization: Whether to inject
-                values for parameters that are not in the parameterization if they
-                are not recorded in the observation features' metadata (this can
-                happen if e.g. the point wasn't generated by Ax but attached manually).
+                values for parameters that are not in the parameterization.
+                This will be used to complete the parameterization after re-injecting
+                the parameters that are recorded in the metadata (for parameters
+                that were generated by Ax).
+            use_random_dummy_values: Whether to use random values for missing
+                parameters. If False, we set the values to the middle of
+                the corresponding parameter domain range.
         """
         obs_feats = observation_features
-        if obs_feats.metadata and Keys.FULL_PARAMETERIZATION in obs_feats.metadata:
-            # NOTE: We could just use the full parameterization as stored;
-            # opting for a safer option of only injecting parameters that were
-            # removed, but not altering those that are present if they have different
-            # values in full parameterization as stored in metadata.
-            full_parameterization = not_none(obs_feats.metadata)[
+        has_full_parameterization = Keys.FULL_PARAMETERIZATION in (
+            obs_feats.metadata or {}
+        )
+
+        if obs_feats.parameters == {} and not has_full_parameterization:
+            # Return as is if the observation feature does not have any parameters.
+            return obs_feats
+
+        if has_full_parameterization:
+            # If full parameterization is recorded, use it to fill in missing values.
+            full_parameterization = none_throws(obs_feats.metadata)[
                 Keys.FULL_PARAMETERIZATION
             ]
             obs_feats.parameters = {**full_parameterization, **obs_feats.parameters}
-            return obs_feats
 
-        if inject_dummy_values_to_complete_flat_parameterization:
-            # To cast a parameterization to flattened search space, inject dummy values
-            # for parameters that were not present in it.
-            dummy_values_to_inject = (
-                self._gen_dummy_values_to_complete_flat_parameterization(
-                    observation_features=obs_feats
+        if len(obs_feats.parameters) < len(self.parameters):
+            if inject_dummy_values_to_complete_flat_parameterization:
+                # Inject dummy values for parameters missing from the parameterization.
+                dummy_values_to_inject = (
+                    self._gen_dummy_values_to_complete_flat_parameterization(
+                        observation_features=obs_feats,
+                        use_random_dummy_values=use_random_dummy_values,
+                    )
                 )
-            )
-            obs_feats.parameters = {**dummy_values_to_inject, **obs_feats.parameters}
-            return obs_feats
-
-        # We did not have the full parameterization stored, so we either return the
-        # observation features as given without change, or we inject dummy values if
-        # that behavior was requested via the opt-in flag.
-        warnings.warn(
-            f"Cannot flatten observation features {obs_feats} as full "
-            "parameterization is not recorded in metadata."
-        )
+                obs_feats.parameters = {
+                    **dummy_values_to_inject,
+                    **obs_feats.parameters,
+                }
+            else:
+                # The parameterization is still incomplete.
+                warnings.warn(
+                    f"Cannot flatten observation features {obs_feats} as full "
+                    "parameterization is not recorded in metadata and "
+                    "`inject_dummy_values_to_complete_flat_parameterization` is "
+                    "set to False.",
+                    AxWarning,
+                    stacklevel=2,
+                )
         return obs_feats
 
     def check_membership(
@@ -572,10 +631,10 @@ class HierarchicalSearchSpace(SearchSpace):
                 representation.
         """
 
-        def _hrepr(param: Optional[Parameter], value: Optional[str], level: int) -> str:
+        def _hrepr(param: Parameter | None, value: str | None, level: int) -> str:
             is_level_param = param and not value
             if is_level_param:
-                param = not_none(param)
+                param = none_throws(param)
                 node_name = f"{param.name if parameter_names_only else param}"
                 ret = "\t" * level + node_name + "\n"
                 if param.is_hierarchical:
@@ -588,7 +647,7 @@ class HierarchicalSearchSpace(SearchSpace):
                                 level=level + 2,
                             )
             else:
-                value = not_none(value)
+                value = none_throws(value)
                 node_name = f"({value})"
                 ret = "\t" * level + node_name + "\n"
 
@@ -622,17 +681,18 @@ class HierarchicalSearchSpace(SearchSpace):
 
         Args:
             parameters: Parameterization to cast to hierarchical structure.
-            check_all_parameters_present: Whether to raise an error if a paramete
-                 that is expected to be present (according to values of other
-                 parameters and the hierarchical structure of the search space)
-                 is not specified.
+            check_all_parameters_present: Whether to raise an error if a parameter
+                that is expected to be present (according to values of other
+                parameters and the hierarchical structure of the search space)
+                is not specified. When this is False, if a parameter is missing,
+                its dependents will not be included in the returned parameterization.
         """
         error_msg_prefix: str = (
             f"Parameterization {parameters} violates the hierarchical structure "
             f"of the search space: {self.hierarchical_structure_str}."
         )
 
-        def _find_applicable_parameters(root: Parameter) -> Set[str]:
+        def _find_applicable_parameters(root: Parameter) -> set[str]:
             applicable = {root.name}
             if check_all_parameters_present and root.name not in parameters:
                 raise RuntimeError(
@@ -640,11 +700,15 @@ class HierarchicalSearchSpace(SearchSpace):
                     + f"Parameter '{root.name}' not in parameterization to cast."
                 )
 
-            if not root.is_hierarchical:
+            # Return if the root parameter is not hierarchical or if it is not
+            # in the parameterization to cast.
+            if not root.is_hierarchical or root.name not in parameters:
                 return applicable
 
+            # Find the dependents of the current root parameter.
+            root_val = parameters[root.name]
             for val, deps in root.dependents.items():
-                if parameters[root.name] == val:
+                if root_val == val:
                     for dep in deps:
                         applicable.update(_find_applicable_parameters(root=self[dep]))
 
@@ -656,7 +720,7 @@ class HierarchicalSearchSpace(SearchSpace):
         ):
             raise RuntimeError(
                 error_msg_prefix
-                + f"Parameters {applicable_paramers- set(parameters.keys())} are"
+                + f"Parameters {applicable_paramers - set(parameters.keys())} are"
                 " missing."
             )
 
@@ -714,7 +778,7 @@ class HierarchicalSearchSpace(SearchSpace):
         are reachable and part of the tree.
         """
 
-        def _check_subtree(root: Parameter) -> Set[str]:
+        def _check_subtree(root: Parameter) -> set[str]:
             logger.debug(f"Verifying subtree with root {root}...")
             visited = {root.name}
             # Base case: validate leaf node.
@@ -749,8 +813,10 @@ class HierarchicalSearchSpace(SearchSpace):
         logger.debug(f"Visited all parameters in the tree: {visited}.")
 
     def _gen_dummy_values_to_complete_flat_parameterization(
-        self, observation_features: core.observation.ObservationFeatures
-    ) -> Dict[str, TParamValue]:
+        self,
+        observation_features: core.observation.ObservationFeatures,
+        use_random_dummy_values: bool,
+    ) -> dict[str, TParamValue]:
         dummy_values_to_inject = {}
         for param_name, param in self.parameters.items():
             if param_name in observation_features.parameters:
@@ -758,11 +824,27 @@ class HierarchicalSearchSpace(SearchSpace):
             if isinstance(param, FixedParameter):
                 dummy_values_to_inject[param_name] = param.value
             elif isinstance(param, ChoiceParameter):
-                dummy_values_to_inject[param_name] = choice(param.values)
+                if use_random_dummy_values:
+                    dummy_value = choice(param.values)
+                else:
+                    dummy_value = param.values[len(param.values) // 2]
+                dummy_values_to_inject[param_name] = dummy_value
             elif isinstance(param, RangeParameter):
-                val = uniform(param.lower, param.upper)
-                print(val)
+                lower, upper = float(param.lower), float(param.upper)
+                if use_random_dummy_values:
+                    val = uniform(lower, upper)
+                elif param.log_scale:
+                    log_lower, log_upper = math.log10(lower), math.log10(upper)
+                    log_mid = (log_upper + log_lower) / 2.0
+                    val = math.pow(10, log_mid)
+                elif param.logit_scale:
+                    logit_lower, logit_upper = logit(lower).item(), logit(upper).item()
+                    logit_mid = (logit_upper + logit_lower) / 2.0
+                    val = expit(logit_mid).item()
+                else:
+                    val = (upper + lower) / 2.0
                 if param.parameter_type is ParameterType.INT:
+                    # This makes the distribution uniform after casting to int.
                     val += 0.5
                 dummy_values_to_inject[param_name] = param.cast(val)
             else:
@@ -782,11 +864,11 @@ class RobustSearchSpace(SearchSpace):
 
     def __init__(
         self,
-        parameters: List[Parameter],
-        parameter_distributions: List[ParameterDistribution],
+        parameters: list[Parameter],
+        parameter_distributions: list[ParameterDistribution],
         num_samples: int,
-        environmental_variables: Optional[List[Parameter]] = None,
-        parameter_constraints: Optional[List[ParameterConstraint]] = None,
+        environmental_variables: list[Parameter] | None = None,
+        parameter_constraints: list[ParameterConstraint] | None = None,
     ) -> None:
         """Initialize the robust search space.
 
@@ -815,10 +897,10 @@ class RobustSearchSpace(SearchSpace):
         self.parameter_distributions = parameter_distributions
         # Make sure that the env var names are unique.
         environmental_variables = environmental_variables or []
-        all_env_vars: Set[str] = {p.name for p in environmental_variables}
+        all_env_vars: set[str] = {p.name for p in environmental_variables}
         if len(all_env_vars) < len(environmental_variables):
             raise UserInputError("Environmental variable names must be unique!")
-        self._environmental_variables: Dict[str, Parameter] = {
+        self._environmental_variables: dict[str, Parameter] = {
             p.name: p for p in environmental_variables
         }
         # Make sure that the environmental variables and parameters are distinct.
@@ -846,7 +928,7 @@ class RobustSearchSpace(SearchSpace):
         """
         distributions = self.parameter_distributions
         # Make sure that there is at most one distribution per parameter.
-        self._distributional_parameters: Set[str] = set()
+        self._distributional_parameters: set[str] = set()
         for dist in distributions:
             duplicates = self._distributional_parameters.intersection(dist.parameters)
             if duplicates:
@@ -863,8 +945,8 @@ class RobustSearchSpace(SearchSpace):
                 "All environmental variables must have a distribution specified."
             )
 
-        self._environmental_distributions: List[ParameterDistribution] = []
-        self._perturbation_distributions: List[ParameterDistribution] = []
+        self._environmental_distributions: list[ParameterDistribution] = []
+        self._perturbation_distributions: list[ParameterDistribution] = []
         if len(all_env_vars) > 0:
             if all_env_vars != self._distributional_parameters:
                 # NOTE: We do not support mixing env var and input noise together
@@ -924,7 +1006,7 @@ class RobustSearchSpace(SearchSpace):
         return parameter_name in self._environmental_variables
 
     @property
-    def parameters(self) -> Dict[str, Parameter]:
+    def parameters(self) -> dict[str, Parameter]:
         """Get all parameters and environmental variables.
 
         We include environmental variables here to support `transform_search_space`
@@ -994,15 +1076,15 @@ class SearchSpaceDigest:
             additional attributes if using a `RobustSearchSpace`.
     """
 
-    feature_names: List[str]
-    bounds: List[Tuple[Union[int, float], Union[int, float]]]
-    ordinal_features: List[int] = field(default_factory=list)
-    categorical_features: List[int] = field(default_factory=list)
-    discrete_choices: Dict[int, List[Union[int, float]]] = field(default_factory=dict)
-    task_features: List[int] = field(default_factory=list)
-    fidelity_features: List[int] = field(default_factory=list)
-    target_values: Dict[int, Union[int, float]] = field(default_factory=dict)
-    robust_digest: Optional[RobustSearchSpaceDigest] = None
+    feature_names: list[str]
+    bounds: list[tuple[int | float, int | float]]
+    ordinal_features: list[int] = field(default_factory=list)
+    categorical_features: list[int] = field(default_factory=list)
+    discrete_choices: Mapping[int, Sequence[int | float]] = field(default_factory=dict)
+    task_features: list[int] = field(default_factory=list)
+    fidelity_features: list[int] = field(default_factory=list)
+    target_values: dict[int, int | float] = field(default_factory=dict)
+    robust_digest: RobustSearchSpaceDigest | None = None
 
 
 @dataclass
@@ -1026,9 +1108,9 @@ class RobustSearchSpaceDigest:
             Only relevant if paired with a `distribution_sampler`.
     """
 
-    sample_param_perturbations: Optional[Callable[[], np.ndarray]] = None
-    sample_environmental: Optional[Callable[[], np.ndarray]] = None
-    environmental_variables: List[str] = field(default_factory=list)
+    sample_param_perturbations: Callable[[], npt.NDArray] | None = None
+    sample_environmental: Callable[[], npt.NDArray] | None = None
+    environmental_variables: list[str] = field(default_factory=list)
     multiplicative: bool = False
 
     def __post_init__(self) -> None:
@@ -1042,7 +1124,7 @@ class RobustSearchSpaceDigest:
             )
 
 
-def _disjoint_union(set1: Set[str], set2: Set[str]) -> Set[str]:
+def _disjoint_union(set1: set[str], set2: set[str]) -> set[str]:
     if not set1.isdisjoint(set2):
         raise UserInputError(
             "Two subtrees in the search space contain the same parameters: "

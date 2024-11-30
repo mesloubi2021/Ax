@@ -4,150 +4,154 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from importlib import reload
-from unittest.mock import patch
+from unittest.mock import MagicMock
 
-from ax.models.torch.botorch_modular import optimizer_argparse as Argparse
+from ax.exceptions.core import UnsupportedError
 from ax.models.torch.botorch_modular.optimizer_argparse import (
-    _argparse_base,
-    MaybeType,
+    BATCH_LIMIT,
+    INIT_BATCH_LIMIT,
+    NUM_RESTARTS,
     optimizer_argparse,
+    RAW_SAMPLES,
 )
-from ax.utils.common.constants import Keys
 from ax.utils.common.testutils import TestCase
 from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.acquisition.knowledge_gradient import (
     qKnowledgeGradient,
     qMultiFidelityKnowledgeGradient,
 )
-from botorch.acquisition.max_value_entropy_search import (
-    qMaxValueEntropy,
-    qMultiFidelityMaxValueEntropy,
-)
-from botorch.acquisition.multi_objective.monte_carlo import (
-    qExpectedHypervolumeImprovement,
-    qNoisyExpectedHypervolumeImprovement,
-)
 
 
 class DummyAcquisitionFunction(AcquisitionFunction):
-    pass
+    def __init__(self) -> None:
+        return
+
+    # pyre-fixme[14]: Inconsistent override
+    # pyre-fixme[15]: Inconsistent override
+    def forward(self) -> int:
+        return 0
 
 
 class OptimizerArgparseTest(TestCase):
-    def test_notImplemented(self) -> None:
-        with self.assertRaises(NotImplementedError) as e:
-            optimizer_argparse[type(None)]  # passing `None` produces a different error
-            self.assertTrue("Could not find signature for" in str(e))
+    def setUp(self) -> None:
+        super().setUp()
+        self.acqf = DummyAcquisitionFunction()
+        self.default_expected_options = {
+            "optimize_acqf": {
+                "num_restarts": NUM_RESTARTS,
+                "raw_samples": RAW_SAMPLES,
+                "options": {
+                    "init_batch_limit": INIT_BATCH_LIMIT,
+                    "batch_limit": BATCH_LIMIT,
+                },
+                "sequential": True,
+            },
+            "optimize_acqf_discrete_local_search": {
+                "num_restarts": NUM_RESTARTS,
+                "raw_samples": RAW_SAMPLES,
+            },
+            "optimize_acqf_discrete": {},
+            "optimize_acqf_mixed": {
+                "num_restarts": NUM_RESTARTS,
+                "raw_samples": RAW_SAMPLES,
+                "options": {
+                    "init_batch_limit": INIT_BATCH_LIMIT,
+                    "batch_limit": BATCH_LIMIT,
+                },
+            },
+            "optimize_acqf_mixed_alternating": {
+                "num_restarts": NUM_RESTARTS,
+                "raw_samples": RAW_SAMPLES,
+                "options": {
+                    "init_batch_limit": INIT_BATCH_LIMIT,
+                    "batch_limit": BATCH_LIMIT,
+                },
+            },
+        }
 
-    def test_register(self) -> None:
-        with patch.dict(optimizer_argparse.funcs, {}):
-
-            @optimizer_argparse.register(DummyAcquisitionFunction)
-            # pyre-fixme[3]: Return type must be annotated.
-            def _argparse(acqf: MaybeType[DummyAcquisitionFunction]):
-                pass
-
-            self.assertEqual(optimizer_argparse[DummyAcquisitionFunction], _argparse)
-
-    def test_fallback(self) -> None:
-        with patch.dict(optimizer_argparse.funcs, {}):
-
-            @optimizer_argparse.register(AcquisitionFunction)
-            # pyre-fixme[3]: Return type must be annotated.
-            def _argparse(acqf: MaybeType[DummyAcquisitionFunction]):
-                pass
-
-            self.assertEqual(optimizer_argparse[DummyAcquisitionFunction], _argparse)
+    def test_unsupported_optimizer(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "optimizer=`wishful thinking` is not supported"
+        ):
+            optimizer_argparse(self.acqf, optimizer="wishful thinking")
 
     def test_optimizer_options(self) -> None:
-        skipped_funcs = {  # These should all have bespoke tests
-            optimizer_argparse[acqf_class]
-            for acqf_class in (
-                qExpectedHypervolumeImprovement,
-                qKnowledgeGradient,
-                qMaxValueEntropy,
-            )
-        }
+        # currently there is only one function in fns_to_test
         user_options = {"foo": "bar", "num_restarts": 13}
-        for func in optimizer_argparse.funcs.values():
-            if func in skipped_funcs:
-                continue
-
-            parsed_options = func(None, optimizer_options=user_options)
-            for key, val in user_options.items():
-                self.assertEqual(val, parsed_options.get(key))
+        for optimizer in [
+            "optimize_acqf",
+            "optimize_acqf_discrete",
+            "optimize_acqf_mixed",
+            "optimize_acqf_discrete_local_search",
+        ]:
+            with self.subTest(optimizer=optimizer):
+                parsed_options = optimizer_argparse(
+                    self.acqf, optimizer_options=user_options, optimizer=optimizer
+                )
+                self.assertDictEqual(
+                    {**self.default_expected_options[optimizer], **user_options},
+                    parsed_options,
+                )
 
         # Also test sub-options.
-        func = _argparse_base
-        parsed_options = func(
-            None, optimizer_options={"options": {"batch_limit": 10, "maxiter": 20}}
-        )
-        self.assertEqual(
-            parsed_options["options"],
-            {"batch_limit": 10, "init_batch_limit": 32, "maxiter": 20},
-        )
+        inner_options = {"batch_limit": 10, "maxiter": 20}
+        options = {"options": inner_options}
+        for optimizer in [
+            "optimize_acqf",
+            "optimize_acqf_mixed",
+            "optimize_acqf_mixed_alternating",
+        ]:
+            default = self.default_expected_options[optimizer]
+            parsed_options = optimizer_argparse(
+                self.acqf, optimizer_options=options, optimizer=optimizer
+            )
+            expected_options = {k: v for k, v in default.items() if k != "options"}
+            if "options" in default:
+                expected_options["options"] = {
+                    **default["options"],
+                    **inner_options,
+                }
+            else:
+                expected_options["options"] = inner_options
+            self.assertDictEqual(expected_options, parsed_options)
 
-    def test_ehvi(self) -> None:
-        user_options = {"foo": "bar", "num_restarts": 651}
-        inner_options = {"init_batch_limit": 23, "batch_limit": 67}
-        generic_options = _argparse_base(None, optimizer_options=user_options)
-        generic_options.pop("options")
+        # Error out if options is specified for an optimizer that does
+        # not support the arg.
+        for optimizer in [
+            "optimize_acqf_discrete",
+            "optimize_acqf_discrete_local_search",
+        ]:
+            with self.assertRaisesRegex(UnsupportedError, "`options` argument"):
+                optimizer_argparse(
+                    self.acqf,
+                    optimizer_options={"options": {"batch_limit": 10, "maxiter": 20}},
+                    optimizer=optimizer,
+                )
+
+    def test_kg(self) -> None:
+        user_options = {"foo": "bar", "num_restarts": 114}
+        generic_options = optimizer_argparse(
+            self.acqf, optimizer_options=user_options, optimizer="optimize_acqf"
+        )
         for acqf in (
-            qExpectedHypervolumeImprovement,
-            qNoisyExpectedHypervolumeImprovement,
+            qKnowledgeGradient(model=MagicMock(), posterior_transform=MagicMock()),
+            qMultiFidelityKnowledgeGradient(
+                model=MagicMock(), posterior_transform=MagicMock()
+            ),
         ):
             with self.subTest(acqf=acqf):
                 options = optimizer_argparse(
-                    acqf,
-                    optimizer_options=user_options,
-                    **inner_options,
-                )
-                self.assertEqual(options["sequential"], True)
-                self.assertEqual(options.pop("options"), inner_options)
-                self.assertEqual(options, generic_options)
-
-                # Defaults
-                options = optimizer_argparse(
-                    acqf,
-                    sequential=True,
-                    optimizer_options=user_options,
-                )
-                self.assertEqual(
-                    options.pop("options"), {"init_batch_limit": 32, "batch_limit": 5}
+                    acqf, optimizer_options=user_options, optimizer="optimize_acqf"
                 )
                 self.assertEqual(options, generic_options)
 
-    def test_kg(self) -> None:
-        with patch(
-            "botorch.optim.initializers.gen_one_shot_kg_initial_conditions"
-        ) as mock_gen_initial_conditions:
-            mock_gen_initial_conditions.return_value = "TEST"
-            reload(Argparse)
-
-            user_options = {"foo": "bar", "num_restarts": 114}
-            generic_options = _argparse_base(None, optimizer_options=user_options)
-            for acqf in (qKnowledgeGradient, qMultiFidelityKnowledgeGradient):
-                with self.subTest(acqf=acqf):
-                    options = optimizer_argparse(
-                        acqf,
-                        q=None,
-                        bounds=None,
-                        optimizer_options=user_options,
-                    )
-                    self.assertEqual(options.pop(Keys.BATCH_INIT_CONDITIONS), "TEST")
-                    self.assertEqual(options, generic_options)
-
-    def test_mes(self) -> None:
-        user_options = {"foo": "bar", "num_restarts": 83}
-        generic_options = _argparse_base(None, optimizer_options=user_options)
-        for acqf in (qMaxValueEntropy, qMultiFidelityMaxValueEntropy):
-            with self.subTest(acqf=acqf):
-                options = optimizer_argparse(
-                    acqf,
-                    optimizer_options=user_options,
-                )
-                self.assertEqual(options["sequential"], True)
-                self.assertEqual(options, generic_options)
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Ax is attempting to use a discrete or mixed optimizer, "
+                    "`optimize_acqf_mixed`, ",
+                ):
+                    optimizer_argparse(acqf, optimizer="optimize_acqf_mixed")

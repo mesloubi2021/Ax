@@ -4,7 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import itertools
+from copy import deepcopy
+from unittest import mock
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -12,7 +16,7 @@ from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.data import Data
 from ax.core.generator_run import GeneratorRun, GeneratorRunType
 from ax.core.runner import Runner
-from ax.exceptions.core import UserInputError
+from ax.exceptions.core import UnsupportedError, UserInputError
 from ax.runners.synthetic import SyntheticRunner
 from ax.utils.common.result import Ok
 from ax.utils.common.testutils import TestCase
@@ -41,10 +45,31 @@ TEST_DATA = Data(
 
 class TrialTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
+        self.mock_supports_trial_type = mock.patch(
+            f"{get_experiment.__module__}.Experiment.supports_trial_type",
+            return_value=True,
+        )
+        self.mock_supports_trial_type.start()
         self.experiment = get_experiment()
-        self.trial = self.experiment.new_trial()
+        self.trial = self.experiment.new_trial(ttl_seconds=123, trial_type="foo")
+        self.trial.update_run_metadata(metadata={"foo": "bar"})
+        self.trial.update_stop_metadata(metadata={"bar": "baz"})
         self.arm = get_arms()[0]
         self.trial.add_arm(self.arm)
+
+    def tearDown(self) -> None:
+        self.mock_supports_trial_type.stop()
+
+    def test__validate_can_attach_data(self) -> None:
+        self.trial.mark_running(no_runner_required=True)
+        self.trial.mark_completed()
+
+        expected_msg = (
+            "Trial 0 has already been completed with data. To add more data to "
+        )
+        with self.assertRaisesRegex(UnsupportedError, expected_msg):
+            self.trial._validate_can_attach_data()
 
     def test_eq(self) -> None:
         new_trial = self.experiment.new_trial()
@@ -67,10 +92,11 @@ class TrialTest(TestCase):
         with self.assertRaises(AttributeError):
             self.experiment.new_trial().arm_weights
 
-        self.trial._status = TrialStatus.RUNNING
+        self.trial.mark_running(no_runner_required=True)
         self.assertTrue(self.trial.status.is_running)
 
         self.trial._status = TrialStatus.COMPLETED
+        self.assertEqual(str(self.trial._status), "TrialStatus.COMPLETED")
         self.assertTrue(self.trial.status.is_completed)
         self.assertTrue(self.trial.completed_successfully)
 
@@ -138,6 +164,21 @@ class TrialTest(TestCase):
         self.assertTrue(self.trial.status.is_failed)
         self.assertTrue(self.trial.did_not_complete)
         self.assertEqual(self.trial.failed_reason, fail_reason)
+
+    def test_trial_run_does_not_overwrite_existing_metadata(self) -> None:
+        self.trial.runner = SyntheticRunner(dummy_metadata="y")
+        self.trial.update_run_metadata({"orig_metadata": "x"})
+        self.trial.run()
+        self.assertDictEqual(
+            self.trial.run_metadata,
+            {
+                "name": "test_0",
+                "orig_metadata": "x",
+                "dummy_metadata": "y",
+                # this is set in setUp
+                "foo": "bar",
+            },
+        )
 
     def test_mark_as(self) -> None:
         for terminal_status in (
@@ -249,14 +290,20 @@ class TrialTest(TestCase):
         self.assertEqual(str(self.trial), repr_)
 
     def test_update_run_metadata(self) -> None:
-        self.assertEqual(len(self.trial.run_metadata), 0)
+        self.assertEqual(len(self.trial.run_metadata), 1)
+        old_run_metadata = deepcopy(self.trial.run_metadata)
         self.trial.update_run_metadata({"something": "new"})
-        self.assertEqual(self.trial.run_metadata, {"something": "new"})
+        self.assertDictEqual(
+            self.trial.run_metadata, {**old_run_metadata, "something": "new"}
+        )
 
     def test_update_stop_metadata(self) -> None:
-        self.assertEqual(len(self.trial.stop_metadata), 0)
+        self.assertEqual(len(self.trial.stop_metadata), 1)
+        old_stop_metadata = deepcopy(self.trial.stop_metadata)
         self.trial.update_stop_metadata({"something": "new"})
-        self.assertEqual(self.trial.stop_metadata, {"something": "new"})
+        self.assertEqual(
+            self.trial.stop_metadata, {**old_stop_metadata, "something": "new"}
+        )
 
     def test_update_trial_data(self) -> None:
         # Verify components before we attach trial data
@@ -314,3 +361,46 @@ class TrialTest(TestCase):
             "Raw data does not conform to the expected structure.",
         ):
             map_trial.update_trial_data(raw_data=[["aa", {"m1": 1.0}]])
+
+    def test_clone_to(self) -> None:
+        # cloned trial attached to the same experiment
+        self.trial.mark_running(no_runner_required=True)
+        new_trial = self.trial.clone_to()
+        self.assertIs(new_trial.experiment, self.trial.experiment)
+        # Test equality of all attributes except index, time_created, and experiment.
+        for k, v in new_trial.__dict__.items():
+            if k in ["_index", "_time_created", "_experiment", "_time_run_started"]:
+                continue
+            self.assertEqual(v, self.trial.__dict__[k])
+
+        # cloned trial attached to a new experiment
+        new_experiment = get_experiment()
+        new_trial = self.trial.clone_to(new_experiment)
+        self.assertEqual(new_trial, self.trial)
+
+        # make sure updating cloned trial doesn't affect original one
+        new_trial._status = TrialStatus.COMPLETED
+        self.assertTrue(new_trial.status.is_completed)
+        self.assertFalse(self.trial.status.is_completed)
+
+    def test_update_trial_status_on_clone(self) -> None:
+        for status in [
+            TrialStatus.CANDIDATE,
+            TrialStatus.STAGED,
+            TrialStatus.RUNNING,
+            TrialStatus.EARLY_STOPPED,
+            TrialStatus.COMPLETED,
+            TrialStatus.FAILED,
+            TrialStatus.ABANDONED,
+        ]:
+            self.trial._failed_reason = self.trial._abandoned_reason = None
+            if status != TrialStatus.CANDIDATE:
+                self.trial.mark_as(
+                    status=status, unsafe=True, no_runner_required=True, reason="test"
+                )
+            test_trial = self.trial.clone_to()
+            # Overwrite unimportant attrs before equality check.
+            test_trial._index = self.trial.index
+            test_trial._time_created = self.trial._time_created
+            test_trial._time_staged = self.trial._time_staged
+            self.assertEqual(self.trial, test_trial)

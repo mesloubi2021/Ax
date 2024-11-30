@@ -4,7 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, Tuple
+# pyre-strict
+
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,7 +27,7 @@ class FactorialMetric(Metric):
     def __init__(
         self,
         name: str,
-        coefficients: Dict[str, Dict[TParamValue, float]],
+        coefficients: dict[str, dict[TParamValue, float]],
         batch_size: int = 10000,
         noise_var: float = 0.0,
     ) -> None:
@@ -39,7 +41,7 @@ class FactorialMetric(Metric):
             noise_var: used in calculating the probability of
                 each arm.
         """
-        super(FactorialMetric, self).__init__(name)
+        super().__init__(name)
 
         self.coefficients = coefficients
         self.batch_size = batch_size
@@ -94,11 +96,11 @@ class FactorialMetric(Metric):
 
 def evaluation_function(
     parameterization: TParameterization,
-    coefficients: Dict[str, Dict[TParamValue, float]],
+    coefficients: dict[str, dict[TParamValue, float]],
     weight: float = 1.0,
     batch_size: int = 10000,
     noise_var: float = 0.0,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     probability = _parameterization_probability(
         parameterization=parameterization,
         coefficients=coefficients,
@@ -114,15 +116,15 @@ def evaluation_function(
 
 def _parameterization_probability(
     parameterization: TParameterization,
-    coefficients: Dict[str, Dict[TParamValue, float]],
+    coefficients: dict[str, dict[TParamValue, float]],
     noise_var: float = 0.0,
 ) -> float:
     z = 0.0
     for factor, level in parameterization.items():
         if factor not in coefficients.keys():
-            raise ValueError("{} not in supplied coefficients".format(factor))
+            raise ValueError(f"{factor} not in supplied coefficients")
         if level not in coefficients[factor].keys():
-            raise ValueError("{} not a valid level of {}".format(level, factor))
+            raise ValueError(f"{level} not a valid level of {factor}")
         z += coefficients[factor][level]
     z += np.sqrt(noise_var) * np.random.randn()
     return np.exp(z) / (1 + np.exp(z))

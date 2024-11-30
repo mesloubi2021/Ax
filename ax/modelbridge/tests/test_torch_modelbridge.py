@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from contextlib import ExitStack
-from typing import Any, Dict, Optional
+from typing import Any
 from unittest import mock
 from unittest.mock import Mock
 
@@ -17,34 +19,48 @@ from ax.core.experiment import Experiment
 from ax.core.metric import Metric
 from ax.core.objective import Objective
 from ax.core.observation import (
+    Observation,
     ObservationData,
     ObservationFeatures,
     recombine_observations,
 )
-from ax.core.optimization_config import OptimizationConfig
+from ax.core.optimization_config import (
+    MultiObjectiveOptimizationConfig,
+    OptimizationConfig,
+)
 from ax.core.outcome_constraint import ScalarizedOutcomeConstraint
+from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.search_space import SearchSpace, SearchSpaceDigest
 from ax.core.types import ComparisonOp
 from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.torch import TorchModelBridge
 from ax.modelbridge.transforms.base import Transform
+from ax.models.torch.botorch_modular.model import BoTorchModel
 from ax.models.torch_base import TorchGenResults, TorchModel
+from ax.utils.common.constants import Keys
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import not_none
+from ax.utils.common.typeutils import checked_cast
 from ax.utils.testing.core_stubs import (
     get_branin_data,
     get_branin_experiment,
     get_branin_search_space,
     get_experiment_with_observations,
+    get_optimization_config_no_constraints,
     get_search_space_for_range_value,
 )
+from ax.utils.testing.mock import mock_botorch_optimize
 from ax.utils.testing.modeling_stubs import get_observation1, transform_1, transform_2
-from botorch.utils.datasets import MultiTaskDataset, SupervisedDataset
+from botorch.utils.datasets import (
+    ContextualDataset,
+    MultiTaskDataset,
+    SupervisedDataset,
+)
+from pyre_extensions import none_throws
 
 
 def _get_mock_modelbridge(
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[torch.device] = None,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
     fit_out_of_design: bool = False,
 ) -> TorchModelBridge:
     return TorchModelBridge(
@@ -68,17 +84,18 @@ class TorchModelBridgeTest(TestCase):
     def test_TorchModelBridge(
         self,
         mock_init: Mock,
-        dtype: Optional[torch.dtype] = None,
-        device: Optional[torch.device] = None,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
     ) -> None:
         ma = _get_mock_modelbridge(dtype=dtype, device=device)
         ma._fit_tracking_metrics = True
+        ma._experiment_properties = {}
         dtype = dtype or torch.double
         self.assertEqual(ma.dtype, dtype)
         self.assertEqual(ma.device, device)
         self.assertFalse(mock_init.call_args[-1]["fit_out_of_design"])
         self.assertIsNone(ma._last_observations)
-        tkwargs: Dict[str, Any] = {"dtype": dtype, "device": device}
+        tkwargs: dict[str, Any] = {"dtype": dtype, "device": device}
         # Test `_fit`.
         feature_names = ["x1", "x2", "x3"]
         model = mock.MagicMock(TorchModel, autospec=True, instance=True)
@@ -116,13 +133,14 @@ class TorchModelBridgeTest(TestCase):
             for y1, y2, yvar1, yvar2 in zip(
                 datasets["y1"].Y.tolist(),
                 datasets["y2"].Y.tolist(),
-                not_none(datasets["y1"].Yvar).tolist(),
-                not_none(datasets["y2"].Yvar).tolist(),
+                none_throws(datasets["y1"].Yvar).tolist(),
+                none_throws(datasets["y2"].Yvar).tolist(),
             )
         ]
         observations = recombine_observations(observation_features, observation_data)
         ssd = SearchSpaceDigest(
-            feature_names=feature_names, bounds=[(0, 1)] * 3  # pyre-ignore
+            feature_names=feature_names,
+            bounds=[(0, 1)] * 3,  # pyre-ignore
         )
 
         with mock.patch(
@@ -136,12 +154,11 @@ class TorchModelBridgeTest(TestCase):
             )
         model_fit_args = model.fit.mock_calls[0][2]
         self.assertEqual(model_fit_args["datasets"], list(datasets.values()))
-        self.assertEqual(model_fit_args["metric_names"], ["y1", "y2"])
         self.assertEqual(model_fit_args["search_space_digest"], ssd)
         self.assertIsNone(model_fit_args["candidate_metadata"])
         self.assertEqual(ma._last_observations, observations)
 
-        with mock.patch(f"{TorchModelBridge.__module__}.logger.info") as mock_logger:
+        with mock.patch(f"{TorchModelBridge.__module__}.logger.debug") as mock_logger:
             ma._fit(
                 model=model,
                 search_space=search_space,
@@ -185,7 +202,9 @@ class TorchModelBridgeTest(TestCase):
             weights=torch.tensor([1.0], **tkwargs),
             gen_metadata={"foo": 99},
         )
-
+        opt_config = OptimizationConfig(
+            objective=Objective(metric=Metric("y1"), minimize=False),
+        )
         with ExitStack() as es:
             es.enter_context(
                 mock.patch(
@@ -215,9 +234,7 @@ class TorchModelBridgeTest(TestCase):
             gen_run = ma.gen(
                 n=3,
                 search_space=search_space,
-                optimization_config=OptimizationConfig(
-                    objective=Objective(metric=Metric("y1"), minimize=False),
-                ),
+                optimization_config=opt_config,
                 pending_observations={
                     "y2": [
                         ObservationFeatures(
@@ -249,6 +266,7 @@ class TorchModelBridgeTest(TestCase):
         self.assertEqual(gen_opt_config.model_gen_options, {"option": "yes"})
         self.assertIs(gen_opt_config.rounding_func, torch.round)
         self.assertFalse(gen_opt_config.is_moo)
+        self.assertEqual(gen_opt_config.opt_config_metrics, opt_config.metrics)
         self.assertEqual(gen_args["search_space_digest"].target_values, {})
         self.assertEqual(len(gen_run.arms), 1)
         self.assertEqual(gen_run.arms[0].parameters, {"x1": 1.0, "x2": 2.0, "x3": 3.0})
@@ -320,6 +338,7 @@ class TorchModelBridgeTest(TestCase):
             torch_device=torch.device("cpu"),
         )
         ma._fit_tracking_metrics = True
+        ma._experiment_properties = {}
         # These attributes would've been set by `ModelBridge` __init__, but it's mocked.
         ma.model = mock_torch_model()
         t = mock.MagicMock(Transform, autospec=True, wraps=Transform(None, None, None))
@@ -329,8 +348,10 @@ class TorchModelBridgeTest(TestCase):
         model_eval_acqf.return_value = torch.tensor([5.0], dtype=torch.float64)
 
         ma._model_space = get_branin_search_space()
+        ma._search_space = get_branin_search_space()
         ma._optimization_config = None
         ma.outcomes = ["test_metric"]
+        ma._fit_out_of_design = False
 
         with self.assertRaisesRegex(ValueError, "optimization_config"):
             ma.evaluate_acquisition_function(
@@ -347,9 +368,7 @@ class TorchModelBridgeTest(TestCase):
                 observation_features=[
                     ObservationFeatures(parameters={"x": 1.0, "y": 2.0})
                 ],
-                optimization_config=OptimizationConfig(
-                    objective=Objective(metric=Metric(name="test_metric"))
-                ),
+                optimization_config=get_optimization_config_no_constraints(),
             )
 
         self.assertEqual(acqf_vals, [5.0])
@@ -376,9 +395,7 @@ class TorchModelBridgeTest(TestCase):
                     ObservationFeatures(parameters={"x": 1.0, "y": 2.0}),
                     ObservationFeatures(parameters={"x": 1.0, "y": 2.0}),
                 ],
-                optimization_config=OptimizationConfig(
-                    objective=Objective(metric=Metric(name="test_metric"))
-                ),
+                optimization_config=get_optimization_config_no_constraints(),
             )
         t.transform_observation_features.assert_any_call(
             [ObservationFeatures(parameters={"x": 1.0, "y": 2.0})],
@@ -402,9 +419,7 @@ class TorchModelBridgeTest(TestCase):
                         ObservationFeatures(parameters={"x": 1.0, "y": 2.0}),
                     ]
                 ],
-                optimization_config=OptimizationConfig(
-                    objective=Objective(metric=Metric(name="test_metric"))
-                ),
+                optimization_config=get_optimization_config_no_constraints(),
             )
         t.transform_observation_features.assert_any_call(
             [
@@ -487,10 +502,10 @@ class TorchModelBridgeTest(TestCase):
             autospec=True,
         ):
             run = modelbridge.gen(n=1, optimization_config=oc)
-            arm, predictions = not_none(run.best_arm_predictions)
-            model_arm, model_predictions = not_none(modelbridge.model_best_point())
-            predictions = not_none(predictions)
-            model_predictions = not_none(model_predictions)
+            arm, predictions = none_throws(run.best_arm_predictions)
+            model_arm, model_predictions = none_throws(modelbridge.model_best_point())
+            predictions = none_throws(predictions)
+            model_predictions = none_throws(model_predictions)
         self.assertEqual(arm.parameters, {})
         self.assertEqual(predictions[0], {"m": 1.0})
         self.assertEqual(predictions[1], {"m": {"m": 2.0}})
@@ -694,7 +709,6 @@ class TorchModelBridgeTest(TestCase):
             else:
                 expected_outcomes = ["m1", "m2"]
             self.assertEqual(modelbridge.outcomes, expected_outcomes)
-            self.assertEqual(call_kwargs["metric_names"], expected_outcomes)
             self.assertEqual(len(call_kwargs["datasets"]), len(expected_outcomes))
 
     def test_convert_observations(self) -> None:
@@ -703,6 +717,7 @@ class TorchModelBridgeTest(TestCase):
             autospec=True,
         ):
             mb = _get_mock_modelbridge()
+            mb._experiment_properties = {"parameter_decomposition": None}
         raw_X = torch.rand(10, 3) * 5
         raw_X[:, -1].round_()  # Make sure last column is integer.
         raw_X[0, -1] = 0  # Make sure task value 0 exists.
@@ -727,22 +742,23 @@ class TorchModelBridgeTest(TestCase):
             (True, MultiTaskDataset),
             (False, SupervisedDataset),
         ):
-            converted_datasets, _ = mb._convert_observations(
+            search_space_digest = SearchSpaceDigest(
+                feature_names=feature_names,
+                bounds=[(0.0, 5.0)] * 3,
+                ordinal_features=[2],
+                discrete_choices={2: list(range(0, 11))},
+                task_features=[2] if use_task else [],
+                target_values={2: 0} if use_task else {},  # pyre-ignore
+            )
+            converted_datasets, ordered_outcomes, _ = mb._convert_observations(
                 observation_data=observation_data,
                 observation_features=observation_features,
                 outcomes=metric_names,
                 parameters=feature_names,
-                search_space_digest=SearchSpaceDigest(
-                    feature_names=feature_names,
-                    bounds=[(0.0, 5.0)] * 3,
-                    ordinal_features=[2],
-                    discrete_choices={2: list(range(0, 11))},  # pyre-ignore
-                    task_features=[2] if use_task else [],
-                    target_values={2: 0} if use_task else {},  # pyre-ignore
-                ),
+                search_space_digest=search_space_digest,
             )
             self.assertEqual(len(converted_datasets), 1)
-            dataset = not_none(converted_datasets[0])
+            dataset = none_throws(converted_datasets[0])
             self.assertIs(dataset.__class__, expected_class)
             if use_task:
                 sort_idx = torch.argsort(raw_X[:, -1])
@@ -756,3 +772,168 @@ class TorchModelBridgeTest(TestCase):
             self.assertIsNone(dataset.Yvar)
             self.assertEqual(dataset.feature_names, feature_names)
             self.assertEqual(dataset.outcome_names, metric_names)
+            self.assertEqual(ordered_outcomes, metric_names)
+
+            with self.assertRaisesRegex(ValueError, "was not observed."):
+                mb._convert_observations(
+                    observation_data=observation_data,
+                    observation_features=observation_features,
+                    outcomes=metric_names + ["extra"],
+                    parameters=feature_names,
+                    search_space_digest=search_space_digest,
+                )
+
+    def test_convert_contextual_observations(self) -> None:
+        raw_X = torch.rand(10, 3) * 5
+        raw_X[:, -1].round_()  # Make sure last column is integer.
+        raw_X[0, -1] = 0  # Make sure task value 0 exists.
+        raw_Y = torch.sin(raw_X).sum(-1)
+        feature_names = ["x0", "x1", "x2"]
+        metric_names = ["y", "y:c0", "y:c1", "y:c2"]
+        parameter_decomposition = {f"c{i}": [f"x{i}"] for i in range(3)}
+        metric_decomposition = {f"c{i}": [f"y:c{i}"] for i in range(3)}
+
+        with mock.patch(
+            f"{ModelBridge.__module__}.ModelBridge.__init__",
+            autospec=True,
+        ):
+            mb = _get_mock_modelbridge()
+            mb._experiment_properties = {
+                "parameter_decomposition": parameter_decomposition,
+                "metric_decomposition": metric_decomposition,
+            }
+
+        observation_features = [
+            ObservationFeatures(
+                parameters={feature_names[i]: x_[i].item() for i in range(3)}
+            )
+            for x_ in raw_X
+        ]
+        num_m = len(metric_names)
+        observation_data = [
+            ObservationData(
+                metric_names=metric_names,
+                means=np.asarray([y for _ in range(num_m)]),
+                covariance=np.array(
+                    [float("nan") for _ in range(num_m * num_m)]
+                ).reshape([num_m, num_m]),
+            )
+            for y in raw_Y
+        ]
+        converted_datasets, ordered_outcomes, _ = mb._convert_observations(
+            observation_data=observation_data,
+            observation_features=observation_features,
+            outcomes=metric_names,
+            parameters=feature_names,
+            search_space_digest=SearchSpaceDigest(
+                feature_names=feature_names,
+                bounds=[(0.0, 5.0)] * 3,
+                ordinal_features=[2],
+                discrete_choices={2: list(range(0, 11))},
+                task_features=[],
+                target_values={},
+            ),
+        )
+        self.assertEqual(len(converted_datasets), 2)
+        expected_outcomes = list(converted_datasets[0].outcome_names)
+        expected_outcomes.extend(list(converted_datasets[1].outcome_names))
+        self.assertEqual(ordered_outcomes, expected_outcomes)
+        for dataset in converted_datasets:
+            self.assertIsInstance(dataset, ContextualDataset)
+            self.assertEqual(dataset.feature_names, feature_names)
+            self.assertDictEqual(
+                checked_cast(ContextualDataset, dataset).parameter_decomposition,
+                parameter_decomposition,
+            )
+            if len(dataset.outcome_names) == 1:
+                self.assertListEqual(dataset.outcome_names, ["y"])
+                self.assertTrue(torch.equal(dataset.X, raw_X))
+                self.assertTrue(torch.equal(dataset.Y, raw_Y.unsqueeze(-1)))
+            else:
+                self.assertListEqual(dataset.outcome_names, ["y:c0", "y:c1", "y:c2"])
+                self.assertListEqual(
+                    checked_cast(ContextualDataset, dataset).context_buckets,
+                    ["c0", "c1", "c2"],
+                )
+                self.assertDictEqual(
+                    none_throws(
+                        checked_cast(ContextualDataset, dataset).metric_decomposition
+                    ),
+                    metric_decomposition,
+                )
+                self.assertTrue(torch.equal(dataset.X, raw_X))
+                self.assertTrue(
+                    torch.equal(
+                        dataset.Y,
+                        torch.cat([raw_Y.unsqueeze(-1) for _ in range(3)], dim=-1),
+                    )
+                )
+        # Test _get_fit_args handling of outcome names
+        mb._fit_tracking_metrics = True
+        search_space = SearchSpace(
+            parameters=[
+                RangeParameter(
+                    name=f"x{i}",
+                    lower=0.0,
+                    upper=5.0,
+                    parameter_type=ParameterType.FLOAT,
+                )
+                for i in range(3)
+            ]
+        )
+        observations = []
+        for i, od in enumerate(observation_data):
+            observations.append(Observation(data=od, features=observation_features[i]))
+        converted_datasets2, _, _ = mb._get_fit_args(
+            search_space=search_space,
+            observations=observations,
+            parameters=feature_names,
+            update_outcomes_and_parameters=True,
+        )
+        self.assertEqual(mb.outcomes, expected_outcomes)
+        self.assertEqual(converted_datasets, converted_datasets2)
+        datasets, _, _ = mb._get_fit_args(
+            search_space=search_space,
+            observations=observations,
+            parameters=feature_names,
+            update_outcomes_and_parameters=False,
+        )
+        self.assertEqual(mb.outcomes, expected_outcomes)
+
+    @mock_botorch_optimize
+    def test_gen_metadata_untransform(self) -> None:
+        experiment = get_experiment_with_observations(
+            observations=[[0.0, 1.0], [2.0, 3.0]]
+        )
+        model = BoTorchModel()
+        mb = TorchModelBridge(
+            experiment=experiment,
+            search_space=experiment.search_space,
+            data=experiment.lookup_data(),
+            model=model,
+            transforms=[],
+        )
+        for additional_metadata in (
+            {},
+            {"objective_thresholds": None},
+            {
+                "objective_thresholds": checked_cast(
+                    MultiObjectiveOptimizationConfig, experiment.optimization_config
+                ).objective_thresholds,
+            },
+        ):
+            gen_return_value = TorchGenResults(
+                points=torch.tensor([[1.0, 2.0, 3.0]]),
+                weights=torch.tensor([1.0]),
+                gen_metadata={Keys.EXPECTED_ACQF_VAL: [1.0], **additional_metadata},
+            )
+            with mock.patch.object(
+                mb, "_untransform_objective_thresholds"
+            ) as mock_untransform, mock.patch.object(
+                model, "gen", return_value=gen_return_value
+            ):
+                mb.gen(n=1)
+            if additional_metadata.get("objective_thresholds", None) is None:
+                mock_untransform.assert_not_called()
+            else:
+                mock_untransform.assert_called_once()

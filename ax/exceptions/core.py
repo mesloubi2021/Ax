@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 class AxError(Exception):
     """Base Ax exception.
@@ -25,8 +27,6 @@ class AxError(Exception):
 class UserInputError(AxError):
     """Raised when the user passes in an invalid input"""
 
-    pass
-
 
 class UnsupportedError(AxError):
     """Raised when an unsupported request is made.
@@ -39,8 +39,6 @@ class UnsupportedError(AxError):
     2. UnsupportedError indicates an intentional and permanent lack of support.
         It should not be used for TODO (another common use case of NIE).
     """
-
-    pass
 
 
 class UnsupportedPlotError(AxError):
@@ -69,13 +67,19 @@ class ExperimentNotReadyError(AxError):
         self.exposures_unavailable = exposures_unavailable
 
 
+class MetricDataNotReadyError(AxError):
+    """Raised when trying to pull metric data from a trial that has
+    not finished running.
+    """
+
+    pass
+
+
 class NoDataError(AxError):
     """Raised when no data is found for experiment in underlying data store.
 
     Useful to distinguish data failure reasons in automated analyses.
     """
-
-    pass
 
 
 class DataRequiredError(AxError):
@@ -86,13 +90,13 @@ class DataRequiredError(AxError):
     more data is available.
     """
 
-    pass
-
 
 class MisconfiguredExperiment(AxError):
     """Raised when experiment has incomplete or incorrect information."""
 
-    pass
+
+class RunnerNotFoundError(AxError):
+    """Raised when a runner is not found."""
 
 
 class OptimizationComplete(AxError):
@@ -125,13 +129,9 @@ class ObjectNotFoundError(AxError, ValueError):
     may be removed in the future.
     """
 
-    pass
-
 
 class ExperimentNotFoundError(ObjectNotFoundError):
     """Raised when an experiment is not found in the database."""
-
-    pass
 
 
 class SearchSpaceExhausted(OptimizationComplete):
@@ -147,8 +147,6 @@ class SearchSpaceExhausted(OptimizationComplete):
 
 class IncompatibleDependencyVersion(AxError):
     """Raise when an imcompatible dependency version is installed."""
-
-    pass
 
 
 class AxWarning(Warning):
@@ -171,4 +169,6 @@ class AxWarning(Warning):
 class AxStorageWarning(AxWarning):
     """Ax warning used for storage related concerns."""
 
-    pass
+
+class AxParameterWarning(AxWarning):
+    """Ax warning used for concerns related to parameter setups."""

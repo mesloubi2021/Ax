@@ -4,13 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
+import warnings
+from collections.abc import Callable
 from copy import deepcopy
 from logging import Logger
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional
 
-import numpy as np
+import numpy.typing as npt
 import torch
 from ax.core.search_space import SearchSpaceDigest
 from ax.core.types import TCandidateMetadata
@@ -40,7 +44,7 @@ from botorch.acquisition.acquisition import AcquisitionFunction
 from botorch.models import ModelList
 from botorch.models.model import Model
 from botorch.utils.datasets import SupervisedDataset
-from botorch.utils.transforms import is_fully_bayesian
+from botorch.utils.transforms import is_ensemble
 from torch import Tensor
 from torch.nn import ModuleList  # @manual
 
@@ -50,18 +54,18 @@ logger: Logger = get_logger(__name__)
 # pyre-fixme[33]: Aliased annotation cannot contain `Any`.
 TModelConstructor = Callable[
     [
-        List[Tensor],
-        List[Tensor],
-        List[Tensor],
-        List[int],
-        List[int],
-        List[str],
-        Optional[Dict[str, Tensor]],
+        list[Tensor],
+        list[Tensor],
+        list[Tensor],
+        list[int],
+        list[int],
+        list[str],
+        Optional[dict[str, Tensor]],
         Any,
     ],
     Model,
 ]
-TModelPredictor = Callable[[Model, Tensor], Tuple[Tensor, Tensor]]
+TModelPredictor = Callable[[Model, Tensor, bool], tuple[Tensor, Tensor]]
 
 
 # pyre-fixme[33]: Aliased annotation cannot contain `Any`.
@@ -70,24 +74,24 @@ TOptimizer = Callable[
         AcquisitionFunction,
         Tensor,
         int,
-        Optional[List[Tuple[Tensor, Tensor, float]]],
-        Optional[List[Tuple[Tensor, Tensor, float]]],
-        Optional[Dict[int, float]],
+        Optional[list[tuple[Tensor, Tensor, float]]],
+        Optional[list[tuple[Tensor, Tensor, float]]],
+        Optional[dict[int, float]],
         Optional[Callable[[Tensor], Tensor]],
         Any,
     ],
-    Tuple[Tensor, Tensor],
+    tuple[Tensor, Tensor],
 ]
 TBestPointRecommender = Callable[
     [
         TorchModel,
-        List[Tuple[float, float]],
+        list[tuple[float, float]],
         Tensor,
-        Optional[Tuple[Tensor, Tensor]],
-        Optional[Tuple[Tensor, Tensor]],
-        Optional[Dict[int, float]],
+        Optional[tuple[Tensor, Tensor]],
+        Optional[tuple[Tensor, Tensor]],
+        Optional[dict[int, float]],
         Optional[TConfig],
-        Optional[Dict[int, float]],
+        Optional[dict[int, float]],
     ],
     Optional[Tensor],
 ]
@@ -122,8 +126,6 @@ class BotorchModel(TorchModel):
             signature as described below.
         refit_on_cv: If True, refit the model for each fold when performing
             cross-validation.
-        refit_on_update: If True, refit the model after updating the training
-            data using the `update` method.
         warm_start_refitting: If True, start model refitting from previous
             model parameters in order to speed up the fitting process.
         prior: An optional dictionary that contains the specification of GP model prior.
@@ -231,13 +233,13 @@ class BotorchModel(TorchModel):
     optimization problems. % TODO: refer to an example.
     """
 
-    dtype: Optional[torch.dtype]
-    device: Optional[torch.device]
-    Xs: List[Tensor]
-    Ys: List[Tensor]
-    Yvars: List[Tensor]
-    _model: Optional[Model]
-    _search_space_digest: Optional[SearchSpaceDigest] = None
+    dtype: torch.dtype | None
+    device: torch.device | None
+    Xs: list[Tensor]
+    Ys: list[Tensor]
+    Yvars: list[Tensor]
+    _model: Model | None
+    _search_space_digest: SearchSpaceDigest | None = None
 
     def __init__(
         self,
@@ -248,13 +250,23 @@ class BotorchModel(TorchModel):
         acqf_optimizer: TOptimizer = scipy_optimizer,
         best_point_recommender: TBestPointRecommender = recommend_best_observed_point,
         refit_on_cv: bool = False,
-        refit_on_update: bool = True,
         warm_start_refitting: bool = True,
         use_input_warping: bool = False,
         use_loocv_pseudo_likelihood: bool = False,
-        prior: Optional[Dict[str, Any]] = None,
+        prior: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        warnings.warn(
+            "The legacy `BotorchModel` and its subclasses, including the current"
+            f"class `{self.__class__.__name__}`, slated for deprecation. "
+            "These models will not be supported going forward and may be "
+            "fully removed in a future release. Please consider using the "
+            "Modular BoTorch Model (MBM) setup (ax/models/torch/botorch_modular) "
+            "instead. If you run into a use case that is not supported by MBM, "
+            "please raise this with an issue at https://github.com/facebook/Ax",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.model_constructor = model_constructor
         self.model_predictor = model_predictor
         self.acqf_constructor = acqf_constructor
@@ -263,33 +275,31 @@ class BotorchModel(TorchModel):
         # pyre-fixme[4]: Attribute must be annotated.
         self._kwargs = kwargs
         self.refit_on_cv = refit_on_cv
-        self.refit_on_update = refit_on_update
         self.warm_start_refitting = warm_start_refitting
         self.use_input_warping = use_input_warping
         self.use_loocv_pseudo_likelihood = use_loocv_pseudo_likelihood
         self.prior = prior
-        self._model: Optional[Model] = None
+        self._model: Model | None = None
         self.Xs = []
         self.Ys = []
         self.Yvars = []
         self.dtype = None
         self.device = None
-        self.task_features: List[int] = []
-        self.fidelity_features: List[int] = []
-        self.metric_names: List[str] = []
+        self.task_features: list[int] = []
+        self.fidelity_features: list[int] = []
+        self.metric_names: list[str] = []
 
     @copy_doc(TorchModel.fit)
     def fit(
         self,
-        datasets: List[SupervisedDataset],
-        metric_names: List[str],
+        datasets: list[SupervisedDataset],
         search_space_digest: SearchSpaceDigest,
-        candidate_metadata: Optional[List[List[TCandidateMetadata]]] = None,
+        candidate_metadata: list[list[TCandidateMetadata]] | None = None,
     ) -> None:
         if len(datasets) == 0:
             raise DataRequiredError("BotorchModel.fit requires non-empty data sets.")
         self.Xs, self.Ys, self.Yvars = _datasets_to_legacy_inputs(datasets=datasets)
-        self.metric_names = metric_names
+        self.metric_names = sum((ds.outcome_names for ds in datasets), [])
         # Store search space info for later use (e.g. during generation)
         self._search_space_digest = search_space_digest
         self.dtype = self.Xs[0].dtype
@@ -315,7 +325,7 @@ class BotorchModel(TorchModel):
         )
 
     @copy_doc(TorchModel.predict)
-    def predict(self, X: Tensor) -> Tuple[Tensor, Tensor]:
+    def predict(self, X: Tensor) -> tuple[Tensor, Tensor]:
         return self.model_predictor(model=self.model, X=X)  # pyre-ignore [28]
 
     @copy_doc(TorchModel.gen)
@@ -341,6 +351,7 @@ class BotorchModel(TorchModel):
             outcome_constraints=torch_opt_config.outcome_constraints,
             linear_constraints=torch_opt_config.linear_constraints,
             fixed_features=torch_opt_config.fixed_features,
+            fit_out_of_design=torch_opt_config.fit_out_of_design,
         )
         model = self.model
         # subset model only to the outcomes we need for the optimization	357
@@ -375,7 +386,7 @@ class BotorchModel(TorchModel):
         # pyre-fixme[53]: Captured variable `objective_weights` is not annotated.
         # pyre-fixme[53]: Captured variable `optimizer_options` is not annotated.
         # pyre-fixme[53]: Captured variable `outcome_constraints` is not annotated.
-        def make_and_optimize_acqf(override_qmc: bool = False) -> Tuple[Tensor, Tensor]:
+        def make_and_optimize_acqf(override_qmc: bool = False) -> tuple[Tensor, Tensor]:
             add_kwargs = {"qmc": False} if override_qmc else {}
             acquisition_function = self.acqf_constructor(
                 model=model,
@@ -416,9 +427,9 @@ class BotorchModel(TorchModel):
 
         gen_metadata = {}
         if expected_acquisition_value.numel() > 0:
-            gen_metadata[
-                "expected_acquisition_value"
-            ] = expected_acquisition_value.tolist()
+            gen_metadata["expected_acquisition_value"] = (
+                expected_acquisition_value.tolist()
+            )
 
         return TorchGenResults(
             points=candidates.detach().cpu(),
@@ -431,7 +442,7 @@ class BotorchModel(TorchModel):
         self,
         search_space_digest: SearchSpaceDigest,
         torch_opt_config: TorchOptConfig,
-    ) -> Optional[Tensor]:
+    ) -> Tensor | None:
         if torch_opt_config.is_moo:
             raise NotImplementedError(
                 "Best observed point is incompatible with MOO problems."
@@ -455,10 +466,11 @@ class BotorchModel(TorchModel):
     @copy_doc(TorchModel.cross_validate)
     def cross_validate(  # pyre-ignore [14]: `search_space_digest` arg not needed here
         self,
-        datasets: List[SupervisedDataset],
+        datasets: list[SupervisedDataset],
         X_test: Tensor,
+        use_posterior_predictive: bool = False,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         if self._model is None:
             raise RuntimeError("Cannot cross-validate model that has not been fitted.")
         if self.refit_on_cv:
@@ -479,9 +491,12 @@ class BotorchModel(TorchModel):
             use_loocv_pseudo_likelihood=self.use_loocv_pseudo_likelihood,
             **self._kwargs,
         )
-        return self.model_predictor(model=model, X=X_test)  # pyre-ignore: [28]
+        # pyre-ignore: [28]
+        return self.model_predictor(
+            model=model, X=X_test, use_posterior_predictive=use_posterior_predictive
+        )
 
-    def feature_importances(self) -> np.ndarray:
+    def feature_importances(self) -> npt.NDArray:
         return get_feature_importances_from_botorch_model(model=self._model)
 
     @property
@@ -510,8 +525,8 @@ class BotorchModel(TorchModel):
 
 
 def get_rounding_func(
-    rounding_func: Optional[Callable[[Tensor], Tensor]]
-) -> Optional[Callable[[Tensor], Tensor]]:
+    rounding_func: Callable[[Tensor], Tensor] | None,
+) -> Callable[[Tensor], Tensor] | None:
     if rounding_func is None:
         botorch_rounding_func = rounding_func
     else:
@@ -527,8 +542,8 @@ def get_rounding_func(
 
 
 def get_feature_importances_from_botorch_model(
-    model: Union[Model, ModuleList, None],
-) -> np.ndarray:
+    model: Model | ModuleList | None,
+) -> npt.NDArray:
     """Get feature importances from a list of BoTorch models.
 
     Args:
@@ -549,7 +564,12 @@ def get_feature_importances_from_botorch_model(
     lengthscales = []
     for m in models:
         try:
-            ls = m.covar_module.base_kernel.lengthscale
+            # this can be a ModelList of a SAAS and STGP, so this is a necessary way
+            # to get the lengthscale
+            if hasattr(m.covar_module, "base_kernel"):
+                ls = m.covar_module.base_kernel.lengthscale
+            else:
+                ls = m.covar_module.lengthscale
         except AttributeError:
             ls = None
         if ls is None or ls.shape[-1] != m.train_inputs[0].shape[-1]:
@@ -557,11 +577,12 @@ def get_feature_importances_from_botorch_model(
             # case, but this require knowing the batch dimension of this model.
             # Consider supporting in the future.
             raise NotImplementedError(
-                "Failed to extract lengthscales from `m.covar_module.base_kernel`"
+                "Failed to extract lengthscales from `m.covar_module` "
+                "and `m.covar_module.base_kernel`"
             )
         if ls.ndim == 2:
             ls = ls.unsqueeze(0)
-        if is_fully_bayesian(m):  # Take the median over the MCMC samples
+        if is_ensemble(m):  # Take the median over the model batch dimension
             ls = torch.quantile(ls, q=0.5, dim=0, keepdim=True)
         lengthscales.append(ls)
     lengthscales = torch.cat(lengthscales, dim=0)

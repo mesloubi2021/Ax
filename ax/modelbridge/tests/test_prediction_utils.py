@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest import mock
 
 import numpy as np
@@ -11,8 +13,9 @@ from ax.core.observation import ObservationFeatures
 from ax.core.types import TEvaluationOutcome, TParameterization
 from ax.modelbridge.prediction_utils import predict_at_point, predict_by_features
 from ax.service.ax_client import AxClient
+from ax.service.utils.instantiation import ObjectiveProperties
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 
 class TestPredictionUtils(TestCase):
@@ -25,7 +28,7 @@ class TestPredictionUtils(TestCase):
 
         observation_features = ObservationFeatures(parameters={"x1": 0.3, "x2": 0.5})
         y_hat, se_hat = predict_at_point(
-            model=not_none(ax_client.generation_strategy.model),
+            model=none_throws(ax_client.generation_strategy.model),
             obsf=observation_features,
             metric_names={"test_metric1"},
         )
@@ -34,7 +37,7 @@ class TestPredictionUtils(TestCase):
         self.assertEqual(len(se_hat), 1)
 
         y_hat, se_hat = predict_at_point(
-            model=not_none(ax_client.generation_strategy.model),
+            model=none_throws(ax_client.generation_strategy.model),
             obsf=observation_features,
             metric_names={"test_metric1", "test_metric2", "test_metric:agg"},
             scalarized_metric_config=[
@@ -48,7 +51,7 @@ class TestPredictionUtils(TestCase):
         self.assertEqual(len(se_hat), 3)
 
         y_hat, se_hat = predict_at_point(
-            model=not_none(ax_client.generation_strategy.model),
+            model=none_throws(ax_client.generation_strategy.model),
             obsf=observation_features,
             metric_names={"test_metric1"},
             scalarized_metric_config=[
@@ -72,7 +75,7 @@ class TestPredictionUtils(TestCase):
             20: ObservationFeatures(parameters={"x1": 0.8, "x2": 0.5}),
         }
         predictions_map = predict_by_features(
-            model=not_none(ax_client.generation_strategy.model),
+            model=none_throws(ax_client.generation_strategy.model),
             label_to_feature_dict=observation_features_dict,
             metric_names={"test_metric1"},
         )
@@ -135,7 +138,7 @@ def _set_up_client_for_get_model_predictions_no_next_trial() -> AxClient:
                 "bounds": [0.1, 1.0],
             },
         ],
-        objective_name="test_metric1",
+        objectives={"test_metric1": ObjectiveProperties(minimize=False)},
         outcome_constraints=["test_metric2 <= 1.5"],
     )
 
@@ -159,5 +162,5 @@ def _attach_completed_trials(ax_client: AxClient) -> None:
 
 # Test metric evaluation method
 def _evaluate_test_metrics(parameters: TParameterization) -> TEvaluationOutcome:
-    x = np.array([parameters.get(f"x{i+1}") for i in range(2)])
+    x = np.array([parameters.get(f"x{i + 1}") for i in range(2)])
     return {"test_metric1": (x[0] / x[1], 0.0), "test_metric2": (x[0] + x[1], 0.0)}

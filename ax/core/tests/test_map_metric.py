@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.map_metric import MapMetric
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_map_data
@@ -13,9 +15,6 @@ METRIC_STRING = "MapMetric('m1')"
 
 
 class MapMetricTest(TestCase):
-    def setUp(self) -> None:
-        pass
-
     def test_Init(self) -> None:
         metric = MapMetric(name="m1", lower_is_better=False)
         self.assertEqual(str(metric), METRIC_STRING)

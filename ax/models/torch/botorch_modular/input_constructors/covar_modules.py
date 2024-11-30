@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any
 
 import torch
 from ax.models.torch.botorch_modular.kernels import ScaleMaternKernel
@@ -28,12 +30,12 @@ covar_module_argparse = Dispatcher(
 
 @covar_module_argparse.register(Kernel)
 def _covar_module_argparse_base(
-    covar_module_class: Type[Kernel],
-    botorch_model_class: Optional[Type[Model]] = None,
-    dataset: Optional[SupervisedDataset] = None,
-    covar_module_options: Optional[Dict[str, Any]] = None,
+    covar_module_class: type[Kernel],
+    botorch_model_class: type[Model] | None = None,
+    dataset: SupervisedDataset | None = None,
+    covar_module_options: dict[str, Any] | None = None,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Extract the covar module kwargs form the given arguments.
 
@@ -69,16 +71,16 @@ def _covar_module_argparse_base(
 
 @covar_module_argparse.register(ScaleMaternKernel)
 def _covar_module_argparse_scale_matern(
-    covar_module_class: Type[ScaleMaternKernel],
-    botorch_model_class: Type[Model],
+    covar_module_class: type[ScaleMaternKernel],
+    botorch_model_class: type[Model],
     dataset: SupervisedDataset,
-    ard_num_dims: Union[int, _DefaultType] = DEFAULT,
-    batch_shape: Union[torch.Size, _DefaultType] = DEFAULT,
-    lengthscale_prior: Optional[Prior] = None,
-    outputscale_prior: Optional[Prior] = None,
-    covar_module_options: Optional[Dict[str, Any]] = None,
+    ard_num_dims: int | _DefaultType = DEFAULT,
+    batch_shape: torch.Size | _DefaultType = DEFAULT,
+    lengthscale_prior: Prior | None = None,
+    outputscale_prior: Prior | None = None,
+    covar_module_options: dict[str, Any] | None = None,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract the base covar module kwargs form the given arguments.
 
     NOTE: This setup does not allow for setting multi-dimensional priors,

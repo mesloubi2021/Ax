@@ -4,11 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import re
 from copy import deepcopy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import plotly.graph_objs as go
 from ax.core.observation import ObservationFeatures
 from ax.modelbridge.base import ModelBridge
@@ -29,8 +32,9 @@ from ax.plot.helper import (
 
 
 # type aliases
-ContourPredictions = Tuple[
-    PlotData, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, bool]
+# pyre-fixme[24]: Generic type `np.ndarray` expects 2 type parameters.
+ContourPredictions = tuple[
+    PlotData, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, bool]
 ]
 
 
@@ -56,8 +60,8 @@ def _get_contour_predictions(
     metric: str,
     generator_runs_dict: TNullableGeneratorRunsDict,
     density: int,
-    slice_values: Optional[Dict[str, Any]] = None,
-    fixed_features: Optional[ObservationFeatures] = None,
+    slice_values: dict[str, Any] | None = None,
+    fixed_features: ObservationFeatures | None = None,
 ) -> ContourPredictions:
     """
     slice_values is a dictionary {param_name: value} for the parameters that
@@ -112,10 +116,10 @@ def plot_contour_plotly(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
+    slice_values: dict[str, Any] | None = None,
     lower_is_better: bool = False,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> go.Figure:
     """Plot predictions for a 2-d slice of the parameter space.
 
@@ -285,10 +289,10 @@ def plot_contour(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
+    slice_values: dict[str, Any] | None = None,
     lower_is_better: bool = False,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
 ) -> AxPlotConfig:
     """Plot predictions for a 2-d slice of the parameter space.
 
@@ -314,6 +318,8 @@ def plot_contour(
         AxPlotConfig: contour plot of objective vs. parameter values
     """
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=plot_contour_plotly(
             model=model,
             param_x=param_x,
@@ -337,10 +343,11 @@ def interact_contour_plotly(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
+    slice_values: dict[str, Any] | None = None,
     lower_is_better: bool = False,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
+    parameters_to_use: list[str] | None = None,
 ) -> go.Figure:
     """Create interactive plot with predictions for a 2-d slice of the parameter
     space.
@@ -360,6 +367,8 @@ def interact_contour_plotly(
         fixed_features: An ObservationFeatures object containing the values of
             features (including non-parameter features like context) to be set
             in the slice.
+        parameters_to_use: List of parameters to use in the plot, in the order they
+            should appear. If None or empty list, use all parameters.
 
     Returns:
         go.Figure: interactive plot of objective vs. parameters
@@ -376,6 +385,15 @@ def interact_contour_plotly(
         slice_values["TRIAL_PARAM"] = str(trial_index)
 
     range_parameters = get_range_parameters(model, min_num_values=5)
+    if parameters_to_use is not None:
+        if len(parameters_to_use) <= 1:
+            raise ValueError(
+                "Contour plots require two or more parameters. "
+                f"Got {parameters_to_use=}."
+            )
+        # Subset range parameters and put them in the same order as parameters_to_use.
+        range_param_name_dict = {p.name: p for p in range_parameters}
+        range_parameters = [range_param_name_dict[pname] for pname in parameters_to_use]
     plot_data, _, _ = get_plot_data(
         model, generator_runs_dict or {}, {metric_name}, fixed_features=fixed_features
     )
@@ -383,8 +401,8 @@ def interact_contour_plotly(
     # TODO T38563759: Sort parameters by feature importances
     param_names = [parameter.name for parameter in range_parameters]
 
-    is_log_dict: Dict[str, bool] = {}
-    grid_dict: Dict[str, np.ndarray] = {}
+    is_log_dict: dict[str, bool] = {}
+    grid_dict: dict[str, npt.NDArray] = {}
     for parameter in range_parameters:
         is_log_dict[parameter.name] = parameter.log_scale
         grid_dict[parameter.name] = get_grid_for_parameter(parameter, density)
@@ -395,12 +413,12 @@ def interact_contour_plotly(
 
     # pyre-fixme[9]: f_dict has type `Dict[str, Dict[str, np.ndarray]]`; used as
     #  `Dict[str, Dict[str, typing.List[Variable[_T]]]]`.
-    f_dict: Dict[str, Dict[str, np.ndarray]] = {
+    f_dict: dict[str, dict[str, npt.NDArray]] = {
         param1: {param2: [] for param2 in param_names} for param1 in param_names
     }
     # pyre-fixme[9]: sd_dict has type `Dict[str, Dict[str, np.ndarray]]`; used as
     #  `Dict[str, Dict[str, typing.List[Variable[_T]]]]`.
-    sd_dict: Dict[str, Dict[str, np.ndarray]] = {
+    sd_dict: dict[str, dict[str, npt.NDArray]] = {
         param1: {param2: [] for param2 in param_names} for param1 in param_names
     }
 
@@ -690,10 +708,17 @@ def interact_contour_plotly(
         f_in_sample_arm_trace = {"xaxis": "x", "yaxis": "y"}
 
         sd_in_sample_arm_trace = {"showlegend": False, "xaxis": "x2", "yaxis": "y2"}
+        # NOTE: Using red to differentiate these points from the blue and green scales
+        # of the contours to avoid confusion.
+        arm_colors = {
+            "color": "rgb(253, 231, 37)",
+            "opacity": 1,
+            "line": {"width": 1, "color": "black"},
+        }
         base_in_sample_arm_config = {
             "hoverinfo": "text",
             "legendgroup": "In-sample",
-            "marker": {"color": "black", "symbol": 1, "opacity": 0.5},
+            "marker": {"symbol": 1, **arm_colors},
             "mode": "markers",
             "name": "In-sample",
             "text": insample_arm_text,
@@ -701,6 +726,10 @@ def interact_contour_plotly(
             "visible": cur_visible,
             "x": insample_param_values[xvar],
             "y": insample_param_values[yvar],
+            "hoverlabel": {
+                "bgcolor": "rgba(50,50,50,1.0)",
+                "font": {"color": "white"},
+            },
         }
 
         for key in base_in_sample_arm_config.keys():
@@ -715,7 +744,7 @@ def interact_contour_plotly(
                 {
                     "hoverinfo": "text",
                     "legendgroup": generator_run_name,
-                    "marker": {"color": "black", "symbol": i, "opacity": 0.5},
+                    "marker": {"symbol": i, **arm_colors},
                     "mode": "markers",
                     "name": generator_run_name,
                     "text": out_of_sample_arm_text[generator_run_name],
@@ -725,13 +754,17 @@ def interact_contour_plotly(
                     "yaxis": "y",
                     "y": out_of_sample_param_values[yvar][generator_run_name],
                     "visible": cur_visible,
+                    "hoverlabel": {
+                        "bgcolor": "rgba(50,50,50,1.0)",
+                        "font": {"color": "white"},
+                    },
                 }
             )
             traces.append(
                 {
                     "hoverinfo": "text",
                     "legendgroup": generator_run_name,
-                    "marker": {"color": "black", "symbol": i, "opacity": 0.5},
+                    "marker": {"symbol": i, **arm_colors},
                     "mode": "markers",
                     "name": "In-sample",
                     "showlegend": False,
@@ -742,6 +775,10 @@ def interact_contour_plotly(
                     "y": out_of_sample_param_values[yvar][generator_run_name],
                     "yaxis": "y2",
                     "visible": cur_visible,
+                    "hoverlabel": {
+                        "bgcolor": "rgba(50,50,50,1.0)",
+                        "font": {"color": "white"},
+                    },
                 }
             )
             i += 1
@@ -880,10 +917,11 @@ def interact_contour(
     generator_runs_dict: TNullableGeneratorRunsDict = None,
     relative: bool = False,
     density: int = 50,
-    slice_values: Optional[Dict[str, Any]] = None,
+    slice_values: dict[str, Any] | None = None,
     lower_is_better: bool = False,
-    fixed_features: Optional[ObservationFeatures] = None,
-    trial_index: Optional[int] = None,
+    fixed_features: ObservationFeatures | None = None,
+    trial_index: int | None = None,
+    parameters_to_use: list[str] | None = None,
 ) -> AxPlotConfig:
     """Create interactive plot with predictions for a 2-d slice of the parameter
     space.
@@ -903,11 +941,15 @@ def interact_contour(
         fixed_features: An ObservationFeatures object containing the values of
             features (including non-parameter features like context) to be set
             in the slice.
+        parameters_to_use: List of parameters to use in the plot, in the order they
+            should appear. If None or empty list, use all parameters.
 
     Returns:
         AxPlotConfig: interactive plot of objective vs. parameters
     """
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=interact_contour_plotly(
             model=model,
             metric_name=metric_name,
@@ -918,6 +960,7 @@ def interact_contour(
             lower_is_better=lower_is_better,
             fixed_features=fixed_features,
             trial_index=trial_index,
+            parameters_to_use=parameters_to_use,
         ),
         plot_type=AxPlotTypes.GENERIC,
     )

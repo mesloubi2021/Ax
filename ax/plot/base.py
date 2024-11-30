@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import enum
 import json
-from typing import Any, Dict, List, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 from ax.core.types import TParameterization
 from ax.utils.common.serialization import named_tuple_to_dict
@@ -34,21 +36,21 @@ class AxPlotTypes(enum.Enum):
 
 # Configuration for all plots
 class _AxPlotConfigBase(NamedTuple):
-    data: Dict[str, Any]
+    data: dict[str, Any]
     plot_type: enum.Enum
 
 
 class AxPlotConfig(_AxPlotConfigBase):
     """Config for plots"""
 
-    def __new__(cls, data: Dict[str, Any], plot_type: enum.Enum) -> "AxPlotConfig":
+    def __new__(cls, data: dict[str, Any], plot_type: enum.Enum) -> "AxPlotConfig":
         # Convert data to json-encodable form (strips out NamedTuple and numpy
         # array). This is a lossy conversion.
         dict_data = json.loads(
             json.dumps(named_tuple_to_dict(data), cls=utils.PlotlyJSONEncoder)
         )
         # pyre-fixme[7]: Expected `AxPlotConfig` but got `NamedTuple`.
-        return super(AxPlotConfig, cls).__new__(cls, dict_data, plot_type)
+        return super().__new__(cls, dict_data, plot_type)
 
 
 # Structs for plot data
@@ -57,11 +59,11 @@ class PlotInSampleArm(NamedTuple):
 
     name: str
     parameters: TParameterization
-    y: Dict[str, float]
-    y_hat: Dict[str, float]
-    se: Dict[str, float]
-    se_hat: Dict[str, float]
-    context_stratum: Optional[Dict[str, Union[str, float]]]
+    y: dict[str, float]
+    y_hat: dict[str, float]
+    se: dict[str, float]
+    se_hat: dict[str, float]
+    context_stratum: dict[str, str | float] | None
 
 
 class PlotOutOfSampleArm(NamedTuple):
@@ -69,18 +71,18 @@ class PlotOutOfSampleArm(NamedTuple):
 
     name: str
     parameters: TParameterization
-    y_hat: Dict[str, float]
-    se_hat: Dict[str, float]
-    context_stratum: Optional[Dict[str, Union[str, float]]]
+    y_hat: dict[str, float]
+    se_hat: dict[str, float]
+    context_stratum: dict[str, str | float] | None
 
 
 class PlotData(NamedTuple):
     """Struct for plot data, including both in-sample and out-of-sample arms"""
 
-    metrics: List[str]
-    in_sample: Dict[str, PlotInSampleArm]
-    out_of_sample: Optional[Dict[str, Dict[str, PlotOutOfSampleArm]]]
-    status_quo_name: Optional[str]
+    metrics: list[str]
+    in_sample: dict[str, PlotInSampleArm]
+    out_of_sample: dict[str, dict[str, PlotOutOfSampleArm]] | None
+    status_quo_name: str | None
 
 
 class PlotMetric(NamedTuple):

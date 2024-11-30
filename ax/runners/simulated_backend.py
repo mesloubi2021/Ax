@@ -4,9 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 from collections import defaultdict
-from typing import Any, Callable, Dict, Iterable, Optional, Set
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import numpy as np
 from ax.core.base_trial import BaseTrial, TrialStatus
@@ -20,7 +23,7 @@ class SimulatedBackendRunner(Runner):
     def __init__(
         self,
         simulator: BackendSimulator,
-        sample_runtime_func: Optional[Callable[[BaseTrial], float]] = None,
+        sample_runtime_func: Callable[[BaseTrial], float] | None = None,
     ) -> None:
         """Runner for a BackendSimulator.
 
@@ -28,14 +31,14 @@ class SimulatedBackendRunner(Runner):
             simulator: The backend simulator.
             sample_runtime_func: A Callable that samples a runtime given a trial.
         """
-        self.simulator = simulator
+        self.simulator: BackendSimulator = simulator
         if sample_runtime_func is None:
             sample_runtime_func = sample_runtime_unif
         self.sample_runtime_func: Callable[[BaseTrial], float] = sample_runtime_func
 
     def poll_trial_status(
         self, trials: Iterable[BaseTrial]
-    ) -> Dict[TrialStatus, Set[int]]:
+    ) -> dict[TrialStatus, set[int]]:
         """Poll trial status from the ``BackendSimulator``. NOTE: The ``Scheduler``
         currently marks trials as running when they are created, but some of these
         trials may actually be in queued on the ``BackendSimulator``.
@@ -51,7 +54,7 @@ class SimulatedBackendRunner(Runner):
             trial_status[status].add(t_index)
         return dict(trial_status)
 
-    def run(self, trial: BaseTrial) -> Dict[str, Any]:
+    def run(self, trial: BaseTrial) -> dict[str, float]:
         """Start a trial on the BackendSimulator.
 
         Args:
@@ -64,7 +67,7 @@ class SimulatedBackendRunner(Runner):
         self.simulator.run_trial(trial_index=trial.index, runtime=runtime)
         return {"runtime": runtime}
 
-    def stop(self, trial: BaseTrial, reason: Optional[str] = None) -> Dict[str, Any]:
+    def stop(self, trial: BaseTrial, reason: str | None = None) -> dict[str, Any]:
         """Stop a trial on the BackendSimulator.
 
         Args:

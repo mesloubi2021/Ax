@@ -4,26 +4,41 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+import logging
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from enum import Enum, unique
+from logging import Logger
+from typing import Any, Callable, TypeVar
+from unittest import mock
 from unittest.mock import MagicMock, Mock, patch
 
+import pandas as pd
+from ax.analysis.analysis import AnalysisCard, AnalysisCardLevel
+from ax.analysis.markdown.markdown_analysis import MarkdownAnalysisCard
+from ax.analysis.plotly.plotly_analysis import PlotlyAnalysisCard
 from ax.core.arm import Arm
-from ax.core.batch_trial import LifecycleStage
+from ax.core.auxiliary import AuxiliaryExperiment, AuxiliaryExperimentPurpose
+from ax.core.base_trial import TrialStatus
+from ax.core.batch_trial import BatchTrial, LifecycleStage
+from ax.core.experiment import Experiment
 from ax.core.generator_run import GeneratorRun
 from ax.core.metric import Metric
-from ax.core.objective import Objective
+from ax.core.objective import MultiObjective, Objective
 from ax.core.outcome_constraint import OutcomeConstraint
 from ax.core.parameter import ParameterType, RangeParameter
 from ax.core.runner import Runner
 from ax.core.types import ComparisonOp
 from ax.exceptions.core import ObjectNotFoundError
-from ax.exceptions.storage import SQADecodeError, SQAEncodeError
+from ax.exceptions.storage import JSONDecodeError, SQADecodeError, SQAEncodeError
 from ax.metrics.branin import BraninMetric
 from ax.modelbridge.dispatch_utils import choose_generation_strategy
 from ax.modelbridge.registry import Models
+from ax.models.torch.botorch_modular.surrogate import Surrogate, SurrogateSpec
 from ax.runners.synthetic import SyntheticRunner
-from ax.storage.metric_registry import CORE_METRIC_REGISTRY, register_metric
+from ax.storage.metric_registry import CORE_METRIC_REGISTRY, register_metrics
 from ax.storage.registry_bundle import RegistryBundle
 from ax.storage.runner_registry import CORE_RUNNER_REGISTRY, register_runner
 from ax.storage.sqa_store.db import (
@@ -42,19 +57,23 @@ from ax.storage.sqa_store.load import (
     _get_experiment_immutable_opt_config_and_search_space,
     _get_experiment_sqa_immutable_opt_config_and_search_space,
     _get_generation_strategy_sqa_immutable_opt_config_and_search_space,
+    load_analysis_cards_by_experiment_name,
     load_experiment,
     load_generation_strategy_by_experiment_name,
     load_generation_strategy_by_id,
 )
 from ax.storage.sqa_store.reduced_state import GR_LARGE_MODEL_ATTRS
 from ax.storage.sqa_store.save import (
+    save_analysis_cards,
     save_experiment,
     save_generation_strategy,
     save_or_update_trial,
     save_or_update_trials,
     update_generation_strategy,
     update_properties_on_experiment,
+    update_properties_on_trial,
     update_runner_on_experiment,
+    update_trial_status,
 )
 from ax.storage.sqa_store.sqa_classes import (
     SQAAbandonedArm,
@@ -71,9 +90,10 @@ from ax.storage.sqa_store.sqa_config import SQAConfig
 from ax.storage.sqa_store.tests.utils import TEST_CASES
 from ax.storage.utils import DomainType, MetricIntent, ParameterConstraintType
 from ax.utils.common.constants import Keys
+from ax.utils.common.logger import get_logger
 from ax.utils.common.serialization import serialize_init_args
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import not_none
+from ax.utils.common.typeutils import checked_cast
 from ax.utils.testing.core_stubs import (
     CustomTestMetric,
     CustomTestRunner,
@@ -105,13 +125,28 @@ from ax.utils.testing.core_stubs import (
     get_sum_constraint2,
     get_synthetic_runner,
 )
-from ax.utils.testing.modeling_stubs import get_generation_strategy
+from ax.utils.testing.mock import mock_botorch_optimize
+from ax.utils.testing.modeling_stubs import (
+    get_generation_strategy,
+    sobol_gpei_generation_node_gs,
+)
+from plotly import graph_objects as go, io as pio
+from pyre_extensions import none_throws
+
+logger: Logger = get_logger(__name__)
 
 GET_GS_SQA_IMM_FUNC = _get_generation_strategy_sqa_immutable_opt_config_and_search_space
+T = TypeVar("T")
+
+
+@unique
+class TestAuxiliaryExperimentPurpose(AuxiliaryExperimentPurpose):
+    MyAuxExpPurpose = "my_auxiliary_experiment_purpose"
 
 
 class SQAStoreTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         init_test_engine_and_session_factory(force_init=True)
         self.config = SQAConfig()
         self.encoder = Encoder(config=self.config)
@@ -121,6 +156,7 @@ class SQAStoreTest(TestCase):
             get_range_parameter(),  # w
             get_range_parameter2(),  # x
         ]
+        self.config.auxiliary_experiment_purpose_enum = TestAuxiliaryExperimentPurpose
 
     def test_CreationOfTestDB(self) -> None:
         init_test_engine_and_session_factory(tier_or_path=":memory:", force_init=True)
@@ -176,6 +212,20 @@ class SQAStoreTest(TestCase):
         generator_run_sqa.generator_run_type = 0
         self.decoder.generator_run_from_sqa(generator_run_sqa, False, False)
 
+    @mock_botorch_optimize
+    def test_SaveExperimentWithSurrogateAsModelKwarg(self) -> None:
+        experiment = get_branin_experiment(
+            with_batch=True, num_batch_trial=1, with_completed_batch=True
+        )
+        model = Models.BOTORCH_MODULAR(
+            experiment=experiment,
+            data=experiment.lookup_data(),
+            surrogate=Surrogate(surrogate_spec=SurrogateSpec()),
+        )
+        experiment.new_batch_trial(generator_run=model.gen(1))
+        # ensure we can save the experiment
+        save_experiment(experiment)
+
     def test_ExperimentSaveAndLoad(self) -> None:
         for exp in [
             self.experiment,
@@ -188,6 +238,124 @@ class SQAStoreTest(TestCase):
             self.assertIsNotNone(exp.db_id)
             loaded_experiment = load_experiment(exp.name)
             self.assertEqual(loaded_experiment, exp)
+
+    def test_saving_and_loading_experiment_with_aux_exp(self) -> None:
+        aux_experiment = Experiment(
+            name="test_aux_exp_in_SQAStoreTest",
+            search_space=get_search_space(),
+            optimization_config=get_optimization_config(),
+            description="test description",
+            tracking_metrics=[Metric(name="tracking")],
+            is_test=True,
+        )
+        save_experiment(aux_experiment, config=self.config)
+
+        experiment_w_aux_exp = Experiment(
+            name="test_experiment_w_aux_exp_in_SQAStoreTest",
+            search_space=get_search_space(),
+            optimization_config=get_optimization_config(),
+            description="test description",
+            tracking_metrics=[Metric(name="tracking")],
+            is_test=True,
+            auxiliary_experiments_by_purpose={
+                # pyre-ignore[16]: `AuxiliaryExperimentPurpose` has no attribute
+                self.config.auxiliary_experiment_purpose_enum.MyAuxExpPurpose: [
+                    AuxiliaryExperiment(experiment=aux_experiment)
+                ]
+            },
+        )
+        self.assertIsNone(experiment_w_aux_exp.db_id)
+        save_experiment(experiment_w_aux_exp, config=self.config)
+        self.assertIsNotNone(experiment_w_aux_exp.db_id)
+        loaded_experiment = load_experiment(
+            experiment_w_aux_exp.name, config=self.config
+        )
+        self.assertEqual(experiment_w_aux_exp, loaded_experiment)
+        self.assertEqual(len(loaded_experiment.auxiliary_experiments_by_purpose), 1)
+
+    def test_saving_and_loading_experiment_with_cross_referencing_aux_exp(self) -> None:
+        exp1_name = "test_aux_exp_in_SQAStoreTest1"
+        exp2_name = "test_aux_exp_in_SQAStoreTest2"
+        # pyre-ignore[16]: `AuxiliaryExperimentPurpose` has no attribute
+        exp_purpose = self.config.auxiliary_experiment_purpose_enum.MyAuxExpPurpose
+
+        exp1 = Experiment(
+            name=exp1_name,
+            search_space=get_search_space(),
+            optimization_config=get_optimization_config(),
+            description="test description",
+            tracking_metrics=[Metric(name="tracking")],
+            is_test=True,
+        )
+        exp2 = Experiment(
+            name=exp2_name,
+            search_space=get_search_space(),
+            optimization_config=get_optimization_config(),
+            description="test description",
+            tracking_metrics=[Metric(name="tracking")],
+            is_test=True,
+        )
+        # Save both experiments first
+        save_experiment(exp1, config=self.config)
+        save_experiment(exp2, config=self.config)
+
+        exp1.auxiliary_experiments_by_purpose = {
+            exp_purpose: [AuxiliaryExperiment(experiment=exp2)]
+        }
+        exp2.auxiliary_experiments_by_purpose = {
+            exp_purpose: [AuxiliaryExperiment(experiment=exp1)]
+        }
+
+        # Saving both experiments with cross referencing experiments should be fine
+        save_experiment(exp1, config=self.config)
+        save_experiment(exp2, config=self.config)
+
+        reloaded_exp1 = load_experiment(exp1_name, config=self.config)
+
+        # The reloaded experiment should still have the aux experiment
+        rel_exp1_aux_exps = reloaded_exp1.auxiliary_experiments_by_purpose[exp_purpose]
+        self.assertEqual(len(rel_exp1_aux_exps), 1)
+
+        exp1_aux_exp = exp1.auxiliary_experiments_by_purpose[exp_purpose][0].experiment
+        rel_exp1_aux_exp = rel_exp1_aux_exps[0].experiment
+
+        # The directly reloaded experiment won't be equal since the original exp1 has
+        # recursive aux experiments
+        self.assertNotEqual(exp1_aux_exp, rel_exp1_aux_exp)
+
+        # Manually set exp1's aux's aux experiment to be empty.
+        # Then they will be equal as we don't load aux experiment recursively
+        exp1_aux_exp.auxiliary_experiments_by_purpose = {}
+        self.assertEqual(exp1_aux_exp, rel_exp1_aux_exp)
+
+    def test_saving_an_experiment_with_type_requires_an_enum(self) -> None:
+        self.experiment.experiment_type = "TEST"
+        with self.assertRaises(SQAEncodeError):
+            save_experiment(self.experiment)
+
+    def test_saving_an_experiment_with_type_works_with_an_enum(self) -> None:
+        class TestExperimentTypeEnum(Enum):
+            TEST = 0
+
+        self.experiment.experiment_type = "TEST"
+        save_experiment(
+            self.experiment,
+            config=SQAConfig(experiment_type_enum=TestExperimentTypeEnum),
+        )
+        self.assertIsNotNone(self.experiment.db_id)
+
+    def test_saving_an_experiment_with_type_errors_with_missing_enum_value(
+        self,
+    ) -> None:
+        class TestExperimentTypeEnum(Enum):
+            NOT_TEST = 0
+
+        self.experiment.experiment_type = "TEST"
+        with self.assertRaises(SQAEncodeError):
+            save_experiment(
+                self.experiment,
+                config=SQAConfig(experiment_type_enum=TestExperimentTypeEnum),
+            )
 
     def test_LoadExperimentTrialsInBatches(self) -> None:
         for _ in range(4):
@@ -205,7 +373,9 @@ class SQAStoreTest(TestCase):
     # load experiments with custom runners and metrics without a decoder.
     def test_LoadExperimentSkipMetricsAndRunners(self) -> None:
         # Create a test experiment with a custom metric and runner.
-        experiment = get_experiment_with_custom_runner_and_metric()
+        experiment = get_experiment_with_custom_runner_and_metric(
+            constrain_search_space=False
+        )
 
         # Note that the experiment is created outside of the test code.
         # Confirm that it uses the custom runner and metric
@@ -221,7 +391,7 @@ class SQAStoreTest(TestCase):
             metric_registry,
             partial_encoder_registry,
             partial_decoder_registry,
-        ) = register_metric(metric_cls=CustomTestMetric)
+        ) = register_metrics(metric_clss={CustomTestMetric: None, Metric: 0})
 
         runner_registry, encoder_registry, decoder_registry = register_runner(
             runner_cls=CustomTestRunner,
@@ -236,30 +406,61 @@ class SQAStoreTest(TestCase):
             runner_registry=runner_registry,
         )
 
-        # Save the experiment to db using the updated registries.
-        save_experiment(experiment, config=sqa_config)
+        for immutable in [True, False]:
+            for multi_objective in [True, False]:
+                custom_metric_names = ["custom_test_metric"]
+                experiment = get_experiment_with_custom_runner_and_metric(
+                    constrain_search_space=False,
+                    immutable=immutable,
+                    multi_objective=multi_objective,
+                    num_trials=1,
+                )
+                if multi_objective:
+                    custom_metric_names.extend(["m1", "m3"])
+                    for metric_name in custom_metric_names:
+                        self.assertEqual(
+                            experiment.metrics[metric_name].__class__, CustomTestMetric
+                        )
 
-        # At this point try to load the experiment back without specifying
-        # updated registries. Confirm that this attempt fails.
-        with self.assertRaises(SQADecodeError):
-            loaded_experiment = load_experiment(self.experiment.name)
+                # Save the experiment to db using the updated registries.
+                save_experiment(experiment, config=sqa_config)
 
-        # Now load it with the skip_runners_and_metrics argument set.
-        # The experiment should load (i.e. no exceptions raised)
-        loaded_experiment = load_experiment(
-            self.experiment.name, skip_runners_and_metrics=True
-        )
+                # At this point try to load the experiment back without specifying
+                # updated registries. Confirm that this attempt fails.
+                with self.assertRaises(SQADecodeError):
+                    loaded_experiment = load_experiment(experiment.name)
 
-        # Validate that:
-        #   - the runner is not loaded
-        #   - the metric is loaded as a base Metric class (i.e. not CustomTestMetric)
-        self.assertIs(loaded_experiment.runner, None)
-        self.assertTrue("custom_test_metric" in loaded_experiment.metrics)
-        self.assertEqual(
-            loaded_experiment.metrics["custom_test_metric"].__class__, Metric
-        )
-        self.assertEqual(len(loaded_experiment.trials), 1)
-        self.assertIs(loaded_experiment.trials[0].runner, None)
+                # Now load it with the skip_runners_and_metrics argument set.
+                # The experiment should load (i.e. no exceptions raised)
+                loaded_experiment = load_experiment(
+                    experiment.name, skip_runners_and_metrics=True
+                )
+
+                # Validate that:
+                #   - the runner is not loaded
+                #   - the metric is loaded as a base Metric class, not CustomTestMetric
+                self.assertIs(loaded_experiment.runner, None)
+
+                for metric_name in custom_metric_names:
+                    self.assertTrue(metric_name in loaded_experiment.metrics)
+                    self.assertEqual(
+                        loaded_experiment.metrics["custom_test_metric"].__class__,
+                        Metric,
+                    )
+                self.assertEqual(len(loaded_experiment.trials), 1)
+                trial = loaded_experiment.trials[0]
+                self.assertIs(trial.runner, None)
+                delete_experiment(exp_name=experiment.name)
+                # check generator runs
+                gr = trial.generator_runs[0]
+                if multi_objective and not immutable:
+                    objectives = checked_cast(
+                        MultiObjective, none_throws(gr.optimization_config).objective
+                    ).objectives
+                    for i, objective in enumerate(objectives):
+                        metric = objective.metric
+                        self.assertEqual(metric.name, f"m{1 + 2 * i}")
+                        self.assertEqual(metric.__class__, Metric)
 
     @patch(
         f"{Decoder.__module__}.Decoder.generator_run_from_sqa",
@@ -277,73 +478,138 @@ class SQAStoreTest(TestCase):
     def test_ExperimentSaveAndLoadReducedState(
         self, _mock_exp_from_sqa, _mock_trial_from_sqa, _mock_gr_from_sqa
     ) -> None:
-        # 1. No abandoned arms + no trials case, reduced state should be the
-        # same as non-reduced state.
-        exp = get_experiment_with_multi_objective()
-        save_experiment(exp)
-        loaded_experiment = load_experiment(exp.name, reduced_state=True)
-        self.assertEqual(loaded_experiment, exp)
-        # Make sure decoder function was called with `reduced_state=True`.
-        self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
-        _mock_exp_from_sqa.reset_mock()
+        for skip_runners_and_metrics in [False, True]:
+            # 1. No abandoned arms + no trials case, reduced state should be the
+            # same as non-reduced state.
+            exp = get_experiment_with_multi_objective()
+            save_experiment(exp)
+            loaded_experiment = load_experiment(
+                exp.name,
+                reduced_state=True,
+                skip_runners_and_metrics=skip_runners_and_metrics,
+            )
+            loaded_experiment.runner = exp.runner
+            self.assertEqual(loaded_experiment, exp)
+            # Make sure decoder function was called with `reduced_state=True`.
+            self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
+            _mock_exp_from_sqa.reset_mock()
+            delete_experiment(exp_name=exp.name)
 
-        # 2. Try case with abandoned arms.
-        exp = self.experiment
-        save_experiment(exp)
-        loaded_experiment = load_experiment(exp.name, reduced_state=True)
-        # Experiments are not the same, because one has abandoned arms info.
-        self.assertNotEqual(loaded_experiment, exp)
-        # Remove all abandoned arms and check that all else is equal as expected.
-        exp.trials.get(0)._abandoned_arms_metadata = {}
-        self.assertEqual(loaded_experiment, exp)
-        # Make sure that all relevant decoding functions were called with
-        # `reduced_state=True` and correct number of times.
-        self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
-        self.assertTrue(_mock_trial_from_sqa.call_args[1].get("reduced_state"))
-        # 2 generator runs + regular and status quo.
-        self.assertTrue(_mock_gr_from_sqa.call_args[1].get("reduced_state"))
-        _mock_exp_from_sqa.reset_mock()
-        _mock_trial_from_sqa.reset_mock()
-        _mock_gr_from_sqa.reset_mock()
+            # 2. Try case with abandoned arms.
+            exp = get_experiment_with_batch_trial(constrain_search_space=False)
+            save_experiment(exp)
+            loaded_experiment = load_experiment(
+                exp.name,
+                reduced_state=True,
+                skip_runners_and_metrics=skip_runners_and_metrics,
+            )
+            # Experiments are not the same, because one has abandoned arms info.
+            self.assertNotEqual(loaded_experiment, exp)
+            # Remove all abandoned arms and check that all else is equal as expected.
+            t = checked_cast(BatchTrial, exp.trials[0])
+            t._abandoned_arms_metadata = {}
+            loaded_experiment.runner = exp.runner
+            loaded_experiment._trials[0]._runner = exp._trials[0]._runner
+            self.assertEqual(loaded_experiment, exp)
+            # Make sure that all relevant decoding functions were called with
+            # `reduced_state=True` and correct number of times.
+            self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
+            self.assertTrue(_mock_trial_from_sqa.call_args[1].get("reduced_state"))
+            # 2 generator runs + regular and status quo.
+            self.assertTrue(_mock_gr_from_sqa.call_args[1].get("reduced_state"))
+            _mock_exp_from_sqa.reset_mock()
+            _mock_trial_from_sqa.reset_mock()
+            _mock_gr_from_sqa.reset_mock()
 
-        # 3. Try case with model state and search space + opt.config on a
-        # generator run in the experiment.
-        gr = Models.SOBOL(experiment=exp).gen(1)
-        # Expecting model kwargs to have 6 fields (seed, deduplicate, init_position,
-        # scramble, generated_points, fallback_to_sample_polytope)
-        # and the rest of model-state info on generator run to have values too.
-        mkw = gr._model_kwargs
-        self.assertIsNotNone(mkw)
-        self.assertEqual(len(mkw), 6)
-        bkw = gr._bridge_kwargs
-        self.assertIsNotNone(bkw)
-        self.assertEqual(len(bkw), 9)
-        ms = gr._model_state_after_gen
-        self.assertIsNotNone(ms)
-        self.assertEqual(len(ms), 2)
-        gm = gr._gen_metadata
-        self.assertIsNotNone(gm)
-        self.assertEqual(len(gm), 0)
-        self.assertIsNotNone(gr._search_space, gr.optimization_config)
+            # 3. Try case with model state and search space + opt.config on a
+            # generator run in the experiment.
+            gr = Models.SOBOL(experiment=exp).gen(1)
+            # Expecting model kwargs to have 6 fields (seed, deduplicate, init_position,
+            # scramble, generated_points, fallback_to_sample_polytope)
+            # and the rest of model-state info on generator run to have values too.
+            mkw = gr._model_kwargs
+            self.assertIsNotNone(mkw)
+            self.assertEqual(len(mkw), 6)
+            bkw = gr._bridge_kwargs
+            self.assertIsNotNone(bkw)
+            self.assertEqual(len(bkw), 9)
+            # This has seed, generated points and init position.
+            ms = gr._model_state_after_gen
+            self.assertIsNotNone(ms)
+            self.assertEqual(len(ms), 3)
+            gm = gr._gen_metadata
+            self.assertIsNotNone(gm)
+            self.assertEqual(len(gm), 0)
+            self.assertIsNotNone(gr._search_space, gr.optimization_config)
+            exp.new_trial(generator_run=gr)
+            save_experiment(exp)
+            # Make sure that all relevant decoding functions were called with
+            # `reduced_state=True` and correct number of times.
+            loaded_experiment = load_experiment(
+                exp.name,
+                reduced_state=True,
+                skip_runners_and_metrics=skip_runners_and_metrics,
+            )
+            loaded_experiment.runner = exp.runner
+            loaded_experiment._trials[0]._runner = exp._trials[0]._runner
+            self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
+            self.assertTrue(_mock_trial_from_sqa.call_args[1].get("reduced_state"))
+            # 2 generator runs from trial #0 + 1 from trial #1.
+            self.assertTrue(_mock_gr_from_sqa.call_args[1].get("reduced_state"))
+            self.assertNotEqual(loaded_experiment, exp)
+            # Remove all fields that are not part of the reduced state and
+            # check that everything else is equal as expected.
+            exp.trials.get(1).generator_run._model_kwargs = None
+            exp.trials.get(1).generator_run._bridge_kwargs = None
+            exp.trials.get(1).generator_run._gen_metadata = None
+            exp.trials.get(1).generator_run._model_state_after_gen = None
+            exp.trials.get(1).generator_run._search_space = None
+            exp.trials.get(1).generator_run._optimization_config = None
+            self.assertEqual(loaded_experiment, exp)
+            delete_experiment(exp_name=exp.name)
+
+    def test_ExperimentSaveAndLoadGRWithOptConfig(self) -> None:
+        exp = get_experiment_with_batch_trial(constrain_search_space=False)
+        gr = Models.SOBOL(experiment=exp).gen(
+            n=1, optimization_config=exp.optimization_config
+        )
         exp.new_trial(generator_run=gr)
         save_experiment(exp)
-        # Make sure that all relevant decoding functions were called with
-        # `reduced_state=True` and correct number of times.
-        loaded_experiment = load_experiment(exp.name, reduced_state=True)
-        self.assertTrue(_mock_exp_from_sqa.call_args[1].get("reduced_state"))
-        self.assertTrue(_mock_trial_from_sqa.call_args[1].get("reduced_state"))
-        # 2 generator runs from trial #0 + 1 from trial #1.
-        self.assertTrue(_mock_gr_from_sqa.call_args[1].get("reduced_state"))
-        self.assertNotEqual(loaded_experiment, exp)
-        # Remove all fields that are not part of the reduced state and
-        # check that everything else is equal as expected.
-        exp.trials.get(1).generator_run._model_kwargs = None
-        exp.trials.get(1).generator_run._bridge_kwargs = None
-        exp.trials.get(1).generator_run._gen_metadata = None
-        exp.trials.get(1).generator_run._model_state_after_gen = None
-        exp.trials.get(1).generator_run._search_space = None
-        exp.trials.get(1).generator_run._optimization_config = None
-        self.assertEqual(loaded_experiment, exp)
+        loaded_experiment = load_experiment(
+            exp.name,
+            reduced_state=False,
+            skip_runners_and_metrics=True,
+        )
+        self.assertEqual(loaded_experiment.trials[1], exp.trials[1])
+
+    def test_load_gr_with_non_decodable_metadata_and_reduced_state(self) -> None:
+        def spy(original_method: Callable[..., T]) -> Callable[..., T]:
+            def wrapper(*args: Any, **kwargs: Any) -> T:
+                # Check if a specific argument is set to a certain value
+                if "reduced_state" in kwargs and not kwargs["reduced_state"]:
+                    raise JSONDecodeError("Can't decode gen_metadata")
+                return original_method(*args, **kwargs)
+
+            return wrapper
+
+        gs = get_generation_strategy(
+            with_experiment=True, with_callable_model_kwarg=False
+        )
+        gs.gen(gs.experiment)
+        gs.gen(gs.experiment)
+
+        save_experiment(gs.experiment)
+        save_generation_strategy(gs)
+
+        with self.assertLogs("ax", level=logging.ERROR):
+            with patch.object(
+                Decoder, "generator_run_from_sqa", spy(Decoder.generator_run_from_sqa)
+            ):
+                load_generation_strategy_by_id(
+                    gs_id=none_throws(gs.db_id),
+                    experiment=gs.experiment,
+                    reduced_state=True,
+                )
 
     def test_MTExperimentSaveAndLoad(self) -> None:
         experiment = get_multi_type_experiment(add_trials=True)
@@ -352,6 +618,23 @@ class SQAStoreTest(TestCase):
         self.assertEqual(loaded_experiment.default_trial_type, "type1")
         # pyre-fixme[16]: `Experiment` has no attribute `_trial_type_to_runner`.
         self.assertEqual(len(loaded_experiment._trial_type_to_runner), 2)
+        # pyre-fixme[16]: `Experiment` has no attribute `metric_to_trial_type`.
+        self.assertEqual(loaded_experiment.metric_to_trial_type["m1"], "type1")
+        self.assertEqual(loaded_experiment.metric_to_trial_type["m2"], "type2")
+        # pyre-fixme[16]: `Experiment` has no attribute `_metric_to_canonical_name`.
+        self.assertEqual(loaded_experiment._metric_to_canonical_name["m2"], "m1")
+        self.assertEqual(len(loaded_experiment.trials), 2)
+
+    def test_MTExperimentSaveAndLoadSkipRunnersAndMetrics(self) -> None:
+        experiment = get_multi_type_experiment(add_trials=True)
+        save_experiment(experiment)
+        loaded_experiment = load_experiment(
+            experiment.name, skip_runners_and_metrics=True
+        )
+        self.assertEqual(loaded_experiment.default_trial_type, "type1")
+        # pyre-fixme[16]: `Experiment` has no attribute `_trial_type_to_runner`.
+        self.assertIsNone(loaded_experiment._trial_type_to_runner["type1"])
+        self.assertIsNone(loaded_experiment._trial_type_to_runner["type2"])
         # pyre-fixme[16]: `Experiment` has no attribute `metric_to_trial_type`.
         self.assertEqual(loaded_experiment.metric_to_trial_type["m1"], "type1")
         self.assertEqual(loaded_experiment.metric_to_trial_type["m2"], "type2")
@@ -405,7 +688,9 @@ class SQAStoreTest(TestCase):
         self.assertEqual(self.experiment, loaded_experiment)
 
         # Update a trial by attaching data again
-        self.experiment.attach_data(get_data(trial_index=trial.index))
+        self.experiment.attach_data(
+            get_data(trial_index=trial.index), combine_with_last_data=True
+        )
         save_or_update_trial(experiment=self.experiment, trial=trial)
 
         loaded_experiment = load_experiment(self.experiment.name)
@@ -545,6 +830,26 @@ class SQAStoreTest(TestCase):
 
         self.assertEqual(gr, gr_decoded_reduced_state)
 
+    def test_load_and_save_generator_run_reduced_state(self) -> None:
+        exp = get_branin_experiment()
+        gs = get_generation_strategy(with_callable_model_kwarg=False)
+        gr = gs.gen(exp)
+        original_gen_metadata = {"foo": "bar"}
+        gr._gen_metadata = original_gen_metadata
+        exp.new_trial(generator_run=gr)
+        save_experiment(exp)
+
+        loaded_reduced_state = load_experiment(
+            experiment_name=exp.name, reduced_state=True
+        )
+        save_experiment(loaded_reduced_state)
+        reloaded_experiment = load_experiment(exp.name, reduced_state=False)
+
+        self.assertEqual(
+            original_gen_metadata,
+            reloaded_experiment.trials[0].generator_runs[0].gen_metadata,
+        )
+
     def test_ExperimentUpdates(self) -> None:
         experiment = get_experiment_with_batch_trial()
         save_experiment(experiment)
@@ -675,7 +980,9 @@ class SQAStoreTest(TestCase):
 
         # replace objective
         # (old one should become tracking metric)
-        optimization_config.objective = Objective(metric=Metric(name="objective"))
+        optimization_config.objective = Objective(
+            metric=Metric(name="objective"), minimize=False
+        )
         experiment.optimization_config = optimization_config
         save_experiment(experiment)
         self.assertEqual(
@@ -975,9 +1282,21 @@ class SQAStoreTest(TestCase):
         with self.assertRaises(SQADecodeError):
             self.decoder.parameter_from_sqa(sqa_parameter)
 
+    def test_logit_scale(self) -> None:
+        with self.assertRaisesRegex(NotImplementedError, "logit-scale"):
+            self.encoder.parameter_to_sqa(
+                parameter=RangeParameter(
+                    name="foo",
+                    parameter_type=ParameterType.FLOAT,
+                    lower=0.1,
+                    upper=0.99,
+                    logit_scale=True,
+                )
+            )
+
     def test_ParameterConstraintValidation(self) -> None:
         sqa_parameter_constraint = SQAParameterConstraint(
-            bound=0,
+            bound=Decimal(0),
             constraint_dict={},
             # pyre-fixme[6]: For 3rd param expected `IntEnum` but got
             #  `ParameterConstraintType`.
@@ -996,7 +1315,7 @@ class SQAStoreTest(TestCase):
                 session.add(sqa_parameter_constraint)
 
         sqa_parameter_constraint = SQAParameterConstraint(
-            bound=0,
+            bound=Decimal(0),
             constraint_dict={},
             # pyre-fixme[6]: For 3rd param expected `IntEnum` but got
             #  `ParameterConstraintType`.
@@ -1016,7 +1335,7 @@ class SQAStoreTest(TestCase):
             #  `ParameterConstraintType`.
             type=ParameterConstraintType.ORDER,
             constraint_dict={},
-            bound=0,
+            bound=Decimal(0),
         )
         with self.assertRaises(SQADecodeError):
             self.decoder.parameter_constraint_from_sqa(
@@ -1029,7 +1348,7 @@ class SQAStoreTest(TestCase):
             #  `ParameterConstraintType`.
             type=ParameterConstraintType.SUM,
             constraint_dict={},
-            bound=0,
+            bound=Decimal(0),
         )
         with self.assertRaises(SQADecodeError):
             self.decoder.parameter_constraint_from_sqa(
@@ -1162,7 +1481,8 @@ class SQAStoreTest(TestCase):
             metric_registry,
             partial_encoder_registry,
             partial_decoder_registry,
-        ) = register_metric(metric_cls=MyMetric)
+        ) = register_metrics(metric_clss={MyMetric: None, Metric: 0})
+        self.assertEqual(metric_registry, {MyMetric: mock.ANY, Metric: 0})
         runner_registry, encoder_registry, decoder_registry = register_runner(
             runner_cls=MyRunner,
             encoder_registry=partial_encoder_registry,
@@ -1195,8 +1515,9 @@ class SQAStoreTest(TestCase):
             pass
 
         bundle = RegistryBundle(
-            metric_clss={MyMetric: 1998}, runner_clss={MyRunner: None}
+            metric_clss={MyMetric: 1998, Metric: 0}, runner_clss={MyRunner: None}
         )
+        self.assertEqual(bundle.metric_registry, {MyMetric: 1998, Metric: 0})
 
         experiment = get_experiment_with_batch_trial()
         experiment.runner = MyRunner()
@@ -1221,6 +1542,10 @@ class SQAStoreTest(TestCase):
             # pyre-fixme[6]: For 1st param expected `int` but got `Optional[int]`.
             gs_id=generation_strategy._db_id
         )
+        # Some fields of the reloaded GS are not expected to be set (both will be
+        # set during next model fitting call), so we unset them on the original GS as
+        # well.
+        generation_strategy._unset_non_persistent_state_fields()
         self.assertEqual(generation_strategy, new_generation_strategy)
         self.assertIsNone(generation_strategy._experiment)
 
@@ -1252,7 +1577,119 @@ class SQAStoreTest(TestCase):
         self.assertIsInstance(new_generation_strategy._steps[0].model, Models)
         self.assertEqual(len(new_generation_strategy._generator_runs), 2)
         self.assertEqual(
-            not_none(new_generation_strategy._experiment)._name, experiment._name
+            none_throws(new_generation_strategy._experiment)._name, experiment._name
+        )
+
+    def test_EncodeDecodeGenerationNodeGSWithAdvancedSettings(self) -> None:
+        """Test to ensure that GenerationNode based GenerationStrategies are
+        able to be encoded/decoded correctly. This test adds transition criteria
+        and input constructors to the nodes in the generation strategy.
+        """
+        generation_strategy = sobol_gpei_generation_node_gs(
+            with_input_constructors_all_n=True
+        )
+
+        # Try restoring this generation strategy by its ID in the DB.
+        save_generation_strategy(generation_strategy=generation_strategy)
+        new_generation_strategy = load_generation_strategy_by_id(
+            # pyre-fixme[6]: For 1st param expected `int` but got `Optional[int]`.
+            gs_id=generation_strategy._db_id
+        )
+
+        # Some fields of the reloaded GS are not expected to be set (both will be
+        # set during next model fitting call), so we unset them on the original GS as
+        # well.
+        generation_strategy._unset_non_persistent_state_fields()
+        self.assertEqual(generation_strategy, new_generation_strategy)
+        self.assertIsNone(generation_strategy._experiment)
+        experiment = get_branin_experiment()
+        save_experiment(experiment)
+
+        # Check that we can encode and decode the generation strategy *after*
+        # it has generated some trials and been updated with some data.
+        # Since we now need to `gen`, we remove the fake callable kwarg we added,
+        # since model does not expect it.
+        generation_strategy = sobol_gpei_generation_node_gs(
+            with_input_constructors_all_n=True
+        )
+        experiment.new_trial(generation_strategy.gen(experiment=experiment))
+        generation_strategy.gen(experiment, data=get_branin_data())
+        save_experiment(experiment)
+        save_generation_strategy(generation_strategy=generation_strategy)
+
+        # Try restoring the generation strategy using the experiment its
+        # attached to.
+        new_generation_strategy = load_generation_strategy_by_experiment_name(
+            experiment_name=experiment.name
+        )
+        # Some fields of the reloaded GS are not expected to be set (both will be
+        # set during next model fitting call), so we unset them on the original GS as
+        # well.
+        generation_strategy._unset_non_persistent_state_fields()
+        self.assertEqual(generation_strategy, new_generation_strategy)
+        self.assertIsInstance(
+            new_generation_strategy._nodes[0].model_spec_to_gen_from.model_enum, Models
+        )
+        self.assertEqual(len(new_generation_strategy._generator_runs), 2)
+        self.assertEqual(
+            none_throws(new_generation_strategy._experiment)._name, experiment._name
+        )
+
+    def test_EncodeDecodeGenerationNodeBasedGenerationStrategy(self) -> None:
+        """Test to ensure that GenerationNode based GenerationStrategies are
+        able to be encoded/decoded correctly.
+        """
+        # we don't support callable models for GenNode based strategies
+        generation_strategy = get_generation_strategy(
+            with_generation_nodes=True, with_callable_model_kwarg=False
+        )
+        # Check that we can save a generation strategy without an experiment
+        # attached.
+        save_generation_strategy(generation_strategy=generation_strategy)
+        # Also try restoring this generation strategy by its ID in the DB.
+        new_generation_strategy = load_generation_strategy_by_id(
+            # pyre-fixme[6]: For 1st param expected `int` but got `Optional[int]`.
+            gs_id=generation_strategy._db_id
+        )
+        # Some fields of the reloaded GS are not expected to be set (both will be
+        # set during next model fitting call), so we unset them on the original GS as
+        # well.
+        generation_strategy._unset_non_persistent_state_fields()
+        self.assertEqual(generation_strategy, new_generation_strategy)
+        self.assertIsNone(generation_strategy._experiment)
+
+        # Cannot load generation strategy before it has been saved
+        experiment = get_branin_experiment()
+        save_experiment(experiment)
+        with self.assertRaises(ObjectNotFoundError):
+            load_generation_strategy_by_experiment_name(experiment_name=experiment.name)
+
+        # Check that we can encode and decode the generation strategy *after*
+        # it has generated some trials and been updated with some data.
+        # Since we now need to `gen`, we remove the fake callable kwarg we added,
+        # since model does not expect it.
+        generation_strategy = get_generation_strategy(with_generation_nodes=True)
+        experiment.new_trial(generation_strategy.gen(experiment=experiment))
+        generation_strategy.gen(experiment, data=get_branin_data())
+        save_experiment(experiment)
+
+        save_generation_strategy(generation_strategy=generation_strategy)
+        # Try restoring the generation strategy using the experiment its
+        # attached to.
+        new_generation_strategy = load_generation_strategy_by_experiment_name(
+            experiment_name=experiment.name
+        )
+        # Some fields of the reloaded GS are not expected to be set (both will be
+        # set during next model fitting call), so we unset them on the original GS as
+        # well.
+        generation_strategy._unset_non_persistent_state_fields()
+        self.assertEqual(generation_strategy, new_generation_strategy)
+        self.assertIsInstance(
+            new_generation_strategy._nodes[0].model_spec_to_gen_from.model_enum, Models
+        )
+        self.assertEqual(len(new_generation_strategy._generator_runs), 2)
+        self.assertEqual(
+            none_throws(new_generation_strategy._experiment)._name, experiment._name
         )
 
     def test_EncodeDecodeGenerationStrategyReducedState(self) -> None:
@@ -1292,7 +1729,6 @@ class SQAStoreTest(TestCase):
         # Reloaded generation strategy will not have attributes associated with fitting
         # the model until after it's used to fit the model or generate candidates, so
         # we unset those attributes here and compare equality of the rest.
-        generation_strategy._seen_trial_indices_by_status = None
         generation_strategy._model = None
         self.assertEqual(new_generation_strategy, generation_strategy)
         # Model should be successfully restored in generation strategy even with
@@ -1300,7 +1736,7 @@ class SQAStoreTest(TestCase):
         self.assertIsInstance(new_generation_strategy._steps[0].model, Models)
         self.assertEqual(len(new_generation_strategy._generator_runs), 2)
         self.assertEqual(
-            not_none(new_generation_strategy._experiment)._name, experiment._name
+            none_throws(new_generation_strategy._experiment)._name, experiment._name
         )
         experiment.new_trial(new_generation_strategy.gen(experiment=experiment))
 
@@ -1360,7 +1796,7 @@ class SQAStoreTest(TestCase):
         self.assertIsInstance(new_generation_strategy._steps[0].model, Models)
         self.assertEqual(len(new_generation_strategy._generator_runs), 2)
         self.assertEqual(
-            not_none(new_generation_strategy._experiment)._name, experiment._name
+            none_throws(new_generation_strategy._experiment)._name, experiment._name
         )
         experiment.new_trial(new_generation_strategy.gen(experiment=experiment))
 
@@ -1407,17 +1843,16 @@ class SQAStoreTest(TestCase):
         # Reloaded generation strategy will not have attributes associated with fitting
         # the model until after it's used to fit the model or generate candidates, so
         # we unset those attributes here and compare equality of the rest.
-        generation_strategy._seen_trial_indices_by_status = None
         generation_strategy._model = None
         self.assertEqual(generation_strategy, loaded_generation_strategy)
         self.assertIsNotNone(loaded_generation_strategy._experiment)
         self.assertEqual(
-            not_none(generation_strategy._experiment).description,
+            none_throws(generation_strategy._experiment).description,
             experiment.description,
         )
         self.assertEqual(
-            not_none(generation_strategy._experiment).description,
-            not_none(loaded_generation_strategy._experiment).description,
+            none_throws(generation_strategy._experiment).description,
+            none_throws(loaded_generation_strategy._experiment).description,
         )
 
     def test_GeneratorRunGenMetadata(self) -> None:
@@ -1557,7 +1992,16 @@ class SQAStoreTest(TestCase):
             exp_name = exp.name
             self.assertIsNone(exp.db_id)
             save_experiment(exp)
-            delete_experiment(exp_name)
+            log_msg = (
+                f"You are deleting {exp_name} and all its associated"
+                + " data from the database."
+            )
+            with self.assertLogs(delete_experiment.__module__, logging.INFO) as logger:
+                delete_experiment(exp_name)
+                self.assertTrue(
+                    any(log_msg in output for output in logger.output),
+                    logger.output,
+                )
             with self.assertRaises(ObjectNotFoundError):
                 load_experiment(exp_name)
 
@@ -1601,7 +2045,7 @@ class SQAStoreTest(TestCase):
         _mock_get_gs_sqa_imm_oc_ss,
         _mock_gr_from_sqa,
     ) -> None:
-        experiment = get_experiment_with_batch_trial()
+        experiment = get_experiment_with_batch_trial(constrain_search_space=False)
         experiment._properties = {Keys.IMMUTABLE_SEARCH_SPACE_AND_OPT_CONF: True}
         save_experiment(experiment)
 
@@ -1638,6 +2082,50 @@ class SQAStoreTest(TestCase):
 
         loaded_experiment = load_experiment(experiment.name)
         self.assertTrue(loaded_experiment.immutable_search_space_and_opt_config)
+
+    def test_update_properties_on_trial(self) -> None:
+        experiment = get_experiment_with_batch_trial()
+        self.assertNotIn("foo", experiment.trials[0]._properties)
+        save_experiment(experiment)
+
+        # Add a property to the trial
+        experiment.trials[0]._properties["foo"] = "bar"
+        update_properties_on_trial(
+            trial_with_updated_properties=experiment.trials[0],
+        )
+        loaded_experiment = load_experiment(experiment.name)
+        self.assertEqual(loaded_experiment.trials[0]._properties["foo"], "bar")
+
+    def test_update_properties_on_trial_not_saved(self) -> None:
+        experiment = get_experiment_with_batch_trial()
+        experiment.trials[0]._properties["foo"] = "bar"
+        with self.assertRaisesRegex(
+            ValueError, "Trial must be saved before being updated."
+        ):
+            update_properties_on_trial(
+                trial_with_updated_properties=experiment.trials[0],
+            )
+
+    def test_update_trial_status(self) -> None:
+        experiment = get_experiment_with_batch_trial()
+        self.assertEqual(experiment.trials[0].status, TrialStatus.CANDIDATE)
+        save_experiment(experiment)
+        experiment.trials[0].mark_running(no_runner_required=False)
+
+        update_trial_status(
+            trial_with_updated_status=experiment.trials[0],
+        )
+        loaded_experiment = load_experiment(experiment.name)
+        self.assertEqual(loaded_experiment.trials[0].status, TrialStatus.RUNNING)
+
+    def test_update_trial_status_not_saved(self) -> None:
+        experiment = get_experiment_with_batch_trial()
+        with self.assertRaisesRegex(
+            ValueError, "Trial must be saved before being updated."
+        ):
+            update_trial_status(
+                trial_with_updated_status=experiment.trials[0],
+            )
 
     def test_RepeatedArmStorage(self) -> None:
         experiment = get_experiment_with_batch_trial()
@@ -1703,3 +2191,62 @@ class SQAStoreTest(TestCase):
         engine.dialect.default_schema_name = "ax"
         with self.assertRaises(ValueError):
             create_all_tables(engine)
+
+    def test_AnalysisCard(self) -> None:
+        test_df = pd.DataFrame(
+            columns=["a", "b"],
+            data=[
+                [1, 2],
+                [3, 4],
+            ],
+        )
+        base_analysis_card = AnalysisCard(
+            name="test_base_analysis_card",
+            title="test_title",
+            subtitle="test_subtitle",
+            level=AnalysisCardLevel.DEBUG,
+            df=test_df,
+            blob="test blob",
+            attributes={"foo": "bar"},
+        )
+        markdown_analysis_card = MarkdownAnalysisCard(
+            name="test_markdown_analysis_card",
+            title="test_title",
+            subtitle="test_subtitle",
+            level=AnalysisCardLevel.DEBUG,
+            df=test_df,
+            blob="This is some **really cool** markdown",
+            attributes={"foo": "baz"},
+        )
+        plotly_analysis_card = PlotlyAnalysisCard(
+            name="test_plotly_analysis_card",
+            title="test_title",
+            subtitle="test_subtitle",
+            level=AnalysisCardLevel.DEBUG,
+            df=test_df,
+            blob=pio.to_json(go.Figure()),
+            attributes={"foo": "bad"},
+        )
+        with self.subTest("test_save_analysis_cards"):
+            save_experiment(self.experiment)
+            save_analysis_cards(
+                [base_analysis_card, markdown_analysis_card, plotly_analysis_card],
+                self.experiment,
+            )
+        with self.subTest("test_load_analysis_cards"):
+            loaded_analysis_cards = load_analysis_cards_by_experiment_name(
+                self.experiment.name
+            )
+            self.assertEqual(len(loaded_analysis_cards), 3)
+            self.assertEqual(
+                loaded_analysis_cards[0].blob,
+                base_analysis_card.blob,
+            )
+            self.assertEqual(
+                loaded_analysis_cards[1].blob,
+                markdown_analysis_card.blob,
+            )
+            self.assertEqual(
+                loaded_analysis_cards[2].blob,
+                plotly_analysis_card.blob,
+            )

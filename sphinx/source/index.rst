@@ -4,19 +4,24 @@
    contain the root `toctree` directive.
 
 API Reference
-===============================================
+=============
 
 .. toctree::
    :maxdepth: 2
 
+   analysis
    ax
    benchmark
    core
+   early_stopping
    exceptions
+   global_stopping
+   health_check
    metrics
    modelbridge
    models
    plot
+   preview
    runners
    service
    storage

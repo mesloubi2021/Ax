@@ -4,24 +4,26 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-import numpy as np
+# pyre-strict
+
+import numpy.typing as npt
 from ax.metrics.noisy_function import NoisyFunctionMetric
 from ax.utils.common.typeutils import checked_cast
 from ax.utils.measurement.synthetic_functions import aug_branin, branin
 
 
 class BraninMetric(NoisyFunctionMetric):
-    def f(self, x: np.ndarray) -> float:
+    def f(self, x: npt.NDArray) -> float:
         x1, x2 = x
         return checked_cast(float, branin(x1=x1, x2=x2))
 
 
 class NegativeBraninMetric(BraninMetric):
-    def f(self, x: np.ndarray) -> float:
+    def f(self, x: npt.NDArray) -> float:
         fpos = super().f(x)
         return -fpos
 
 
 class AugmentedBraninMetric(NoisyFunctionMetric):
-    def f(self, x: np.ndarray) -> float:
+    def f(self, x: npt.NDArray) -> float:
         return checked_cast(float, aug_branin(x))

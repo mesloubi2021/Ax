@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from enum import Enum
 from unittest import mock
 
@@ -17,6 +19,7 @@ from ax.utils.testing.core_stubs import get_trial
 
 
 class DummyEnum(Enum):
+    # pyre-fixme[35]: Target cannot be annotated.
     DUMMY: str = "dummy"
 
 
@@ -77,6 +80,9 @@ class ChemistryMetricTest(TestCase):
                 params = dict(zip(param_names, param_values))
                 trial = get_trial()
                 trial._generator_run = GeneratorRun(
+                    # pyre-fixme[6]: For 2nd argument expected `Dict[str,
+                    #  Union[None, bool, float, int, str]]` but got `Dict[str,
+                    #  Union[float, int, str]]`.
                     arms=[Arm(name="0_0", parameters=params)]
                 )
                 df = metric.fetch_trial_data(trial).unwrap().df

@@ -4,11 +4,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from enum import Enum, unique
-from typing import Tuple
+
+# ------------------------- Miscellaneous -------------------------
 
 
-# -------------------------- Warnings --------------------------
+TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
+
+DEFAULT_WINSORIZATION_LIMITS_MINIMIZATION: tuple[float, float] = (0.0, 0.2)
+DEFAULT_WINSORIZATION_LIMITS_MAXIMIZATION: tuple[float, float] = (0.2, 0.0)
+
+TESTENV_ENV_KEY = "TESTENV"
+TESTENV_ENV_VAL = "True"
+
+
+# --------------------------- Warnings ---------------------------
 
 
 EXPERIMENT_IS_TEST_WARNING = (
@@ -18,16 +30,16 @@ EXPERIMENT_IS_TEST_WARNING = (
 )
 
 
-# -------------------------- Error messages --------------------------
+# ------------------------ Error messages ------------------------
 
 
-UNEXPECTED_METRIC_COMBINATION = """
-Unexpected combination of dummy base `Metric` class metrics and `Metric`
+UNEXPECTED_METRIC_COMBINATION = """\
+Unexpected combination of dummy base `Metric` class metrics and `Metric` \
 subclasses with defined fetching logic.
 """
 
 
-# --------------------------- Reserved keys ---------------------------
+# ------------------------- Reserved keys -------------------------
 
 
 @unique
@@ -40,7 +52,6 @@ class Keys(str, Enum):
     """
 
     ACQF_KWARGS = "acquisition_function_kwargs"
-    AUTOSET_SURROGATE = "autoset_surrogate"
     BATCH_INIT_CONDITIONS = "batch_initial_conditions"
     CANDIDATE_SET = "candidate_set"
     CANDIDATE_SIZE = "candidate_size"
@@ -49,11 +60,13 @@ class Keys(str, Enum):
     CURRENT_VALUE = "current_value"
     EXPAND = "expand"
     EXPECTED_ACQF_VAL = "expected_acquisition_value"
+    EXPERIMENT_TOTAL_CONCURRENT_ARMS = "total_concurrent_arms"
     FIDELITY_FEATURES = "fidelity_features"
     FIDELITY_WEIGHTS = "fidelity_weights"
     FRAC_RANDOM = "frac_random"
     FULL_PARAMETERIZATION = "full_parameterization"
     IMMUTABLE_SEARCH_SPACE_AND_OPT_CONF = "immutable_search_space_and_opt_config"
+    LONG_RUN = "long_run"
     MAXIMIZE = "maximize"
     METADATA = "metadata"
     METRIC_NAMES = "metric_names"
@@ -62,26 +75,22 @@ class Keys(str, Enum):
     NUM_RESTARTS = "num_restarts"
     NUM_TRACE_OBSERVATIONS = "num_trace_observations"
     OBJECTIVE = "objective"
-    ONLY_SURROGATE = "only_surrogate"
     OPTIMIZER_KWARGS = "optimizer_kwargs"
+    PAIRWISE_PREFERENCE_QUERY = "pairwise_pref_query"
     PREFERENCE_DATA = "preference_data"
-    PRIMARY_SURROGATE = "primary"
     PROJECT = "project"
-    TRIAL_COMPLETION_TIMESTAMP = "trial_completion_timestamp"
     QMC = "qmc"
     RAW_INNER_SAMPLES = "raw_inner_samples"
     RAW_SAMPLES = "raw_samples"
-    REFIT_ON_UPDATE = "refit_on_update"
+    RESUMED_FROM_STORAGE_TS = "resumed_from_storage_timestamps"
     SAMPLER = "sampler"
     SEED_INNER = "seed_inner"
     SEQUENTIAL = "sequential"
+    SHORT_RUN = "short_run"
     STATE_DICT = "state_dict"
     SUBCLASS = "subclass"
     SUBSET_MODEL = "subset_model"
     TASK_FEATURES = "task_features"
+    TRIAL_COMPLETION_TIMESTAMP = "trial_completion_timestamp"
     WARM_START_REFITTING = "warm_start_refitting"
     X_BASELINE = "X_baseline"
-
-
-DEFAULT_WINSORIZATION_LIMITS_MINIMIZATION: Tuple[float, float] = (0.0, 0.2)
-DEFAULT_WINSORIZATION_LIMITS_MAXIMIZATION: Tuple[float, float] = (0.2, 0.0)

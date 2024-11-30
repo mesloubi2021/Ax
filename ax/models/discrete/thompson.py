@@ -4,11 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import hashlib
 import json
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
 from ax.core.types import TGenMetadata, TParamValue, TParamValueList
 from ax.exceptions.constants import TS_MIN_WEIGHT_ERROR, TS_NO_FEASIBLE_ARMS_ERROR
 from ax.exceptions.model import ModelError
@@ -28,7 +30,7 @@ class ThompsonSampler(DiscreteModel):
     def __init__(
         self,
         num_samples: int = 10000,
-        min_weight: Optional[float] = None,
+        min_weight: float | None = None,
         uniform_weights: bool = False,
     ) -> None:
         """
@@ -56,11 +58,11 @@ class ThompsonSampler(DiscreteModel):
     @copy_doc(DiscreteModel.fit)
     def fit(
         self,
-        Xs: List[List[TParamValueList]],
-        Ys: List[List[float]],
-        Yvars: List[List[float]],
-        parameter_values: List[TParamValueList],
-        outcome_names: List[str],
+        Xs: list[list[TParamValueList]],
+        Ys: list[list[float]],
+        Yvars: list[list[float]],
+        parameter_values: list[TParamValueList],
+        outcome_names: list[str],
     ) -> None:
         self.X = self._fit_X(Xs=Xs)
         self.Ys, self.Yvars = self._fit_Ys_and_Yvars(
@@ -74,13 +76,13 @@ class ThompsonSampler(DiscreteModel):
     def gen(
         self,
         n: int,
-        parameter_values: List[TParamValueList],
-        objective_weights: Optional[np.ndarray],
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        fixed_features: Optional[Dict[int, TParamValue]] = None,
-        pending_observations: Optional[List[List[TParamValueList]]] = None,
-        model_gen_options: Optional[TConfig] = None,
-    ) -> Tuple[List[TParamValueList], List[float], TGenMetadata]:
+        parameter_values: list[TParamValueList],
+        objective_weights: npt.NDArray | None,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+        fixed_features: dict[int, TParamValue] | None = None,
+        pending_observations: list[list[TParamValueList]] | None = None,
+        model_gen_options: TConfig | None = None,
+    ) -> tuple[list[TParamValueList], list[float], TGenMetadata]:
         if objective_weights is None:
             raise ValueError("ThompsonSampler requires objective weights.")
 
@@ -121,7 +123,7 @@ class ThompsonSampler(DiscreteModel):
         return top_arms, top_weights, {"arms_to_weights": list(zip(arms, weights))}
 
     @copy_doc(DiscreteModel.predict)
-    def predict(self, X: List[TParamValueList]) -> Tuple[np.ndarray, np.ndarray]:
+    def predict(self, X: list[TParamValueList]) -> tuple[npt.NDArray, npt.NDArray]:
         n = len(X)  # number of parameterizations at which to make predictions
         m = len(self.Ys)  # number of outcomes
         f = np.zeros((n, m))  # array of outcome predictions
@@ -140,9 +142,9 @@ class ThompsonSampler(DiscreteModel):
 
     def _generate_weights(
         self,
-        objective_weights: np.ndarray,
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-    ) -> List[float]:
+        objective_weights: npt.NDArray,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None = None,
+    ) -> list[float]:
         samples, fraction_all_infeasible = self._produce_samples(
             num_samples=self.num_samples,
             objective_weights=objective_weights,
@@ -172,7 +174,7 @@ class ThompsonSampler(DiscreteModel):
         weights = winner_counts / winner_counts.sum()
         return weights.tolist()
 
-    def _generate_samples_per_metric(self, num_samples: int) -> np.ndarray:
+    def _generate_samples_per_metric(self, num_samples: int) -> npt.NDArray:
         k = len(self.X)
         samples_per_metric = np.zeros(
             (k, num_samples, len(self.Ys))
@@ -189,9 +191,9 @@ class ThompsonSampler(DiscreteModel):
     def _produce_samples(
         self,
         num_samples: int,
-        objective_weights: np.ndarray,
-        outcome_constraints: Optional[Tuple[np.ndarray, np.ndarray]],
-    ) -> Tuple[np.ndarray, float]:
+        objective_weights: npt.NDArray,
+        outcome_constraints: tuple[npt.NDArray, npt.NDArray] | None,
+    ) -> tuple[npt.NDArray, float]:
         k = len(self.X)
         samples_per_metric = self._generate_samples_per_metric(num_samples=num_samples)
 
@@ -211,14 +213,14 @@ class ThompsonSampler(DiscreteModel):
         objective_values = np.dot(
             samples_per_metric, objective_weights
         )  # (k x num_samples)
-        objective_values[any_violation] = -np.Inf
+        objective_values[any_violation] = -np.inf
         best_arm = objective_values.max(axis=0)  # (num_samples,)
-        all_arms_infeasible = best_arm == -np.Inf  # (num_samples,)
+        all_arms_infeasible = best_arm == -np.inf  # (num_samples,)
         fraction_all_infeasible = all_arms_infeasible.mean()
         filtered_objective = objective_values[:, ~all_arms_infeasible]  # (k x ?)
         return filtered_objective, fraction_all_infeasible
 
-    def _validate_Xs(self, Xs: List[List[TParamValueList]]) -> None:
+    def _validate_Xs(self, Xs: list[list[TParamValueList]]) -> None:
         """
         1. Require that all Xs have the same arms, i.e. we have observed
         all arms for all metrics. If so, we can safely use Xs[0] exclusively.
@@ -239,14 +241,14 @@ class ThompsonSampler(DiscreteModel):
                 "i.e. that there is only one observation per parameterization."
             )
 
-    def _fit_X(self, Xs: List[List[TParamValueList]]) -> List[TParamValueList]:
+    def _fit_X(self, Xs: list[list[TParamValueList]]) -> list[TParamValueList]:
         """After validation has been performed, it's safe to use Xs[0]."""
         self._validate_Xs(Xs=Xs)
         return Xs[0]
 
     def _fit_Ys_and_Yvars(
-        self, Ys: List[List[float]], Yvars: List[List[float]], outcome_names: List[str]
-    ) -> Tuple[List[List[float]], List[List[float]]]:
+        self, Ys: list[list[float]], Yvars: list[list[float]], outcome_names: list[str]
+    ) -> tuple[list[list[float]], list[list[float]]]:
         """For plain Thompson Sampling, there's nothing to be done here.
         EmpiricalBayesThompsonSampler will overwrite this method to perform
         shrinkage.
@@ -254,14 +256,14 @@ class ThompsonSampler(DiscreteModel):
         return Ys, Yvars
 
     def _fit_X_to_Ys_and_Yvars(
-        self, X: List[TParamValueList], Ys: List[List[float]], Yvars: List[List[float]]
-    ) -> List[Dict[TParamValueList, Tuple[float, float]]]:
+        self, X: list[TParamValueList], Ys: list[list[float]], Yvars: list[list[float]]
+    ) -> list[dict[TParamValueList, tuple[float, float]]]:
         """Construct lists of mappings, one per outcome, of parameterizations
         to the a tuple of their mean and variance.
         """
         X_to_Ys_and_Yvars = []
         hashableX = [self._hash_TParamValueList(x) for x in X]
-        for (Y, Yvar) in zip(Ys, Yvars):
+        for Y, Yvar in zip(Ys, Yvars):
             X_to_Ys_and_Yvars.append(dict(zip(hashableX, zip(Y, Yvar))))
         return X_to_Ys_and_Yvars
 

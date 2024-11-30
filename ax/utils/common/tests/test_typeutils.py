@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 import numpy as np
 from ax.utils.common.testutils import TestCase
@@ -12,17 +14,11 @@ from ax.utils.common.typeutils import (
     checked_cast_dict,
     checked_cast_list,
     checked_cast_optional,
-    not_none,
-    numpy_type_to_python_type,
 )
+from ax.utils.common.typeutils_nonnative import numpy_type_to_python_type
 
 
 class TestTypeUtils(TestCase):
-    def test_not_none(self) -> None:
-        self.assertEqual(not_none("not_none"), "not_none")
-        with self.assertRaises(ValueError):
-            not_none(None)
-
     def test_checked_cast(self) -> None:
         self.assertEqual(checked_cast(float, 2.0), 2.0)
         with self.assertRaises(ValueError):

@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.types import (
     merge_model_predict,
     validate_evaluation_outcome,
@@ -19,6 +21,7 @@ from ax.utils.common.testutils import TestCase
 
 class TypesTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.num_arms = 2
         mu = {"m1": [0.0, 0.5], "m2": [0.1, 0.6]}
         cov = {

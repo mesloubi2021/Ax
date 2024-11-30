@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import plotly.graph_objects as go
 from ax.modelbridge.cross_validation import cross_validate
 from ax.modelbridge.registry import Models
@@ -14,15 +16,16 @@ from ax.plot.diagnostic import (
 )
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_branin_experiment
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
 
 
 class DiagnosticTest(TestCase):
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def setUp(self) -> None:
+        super().setUp()
         exp = get_branin_experiment(with_batch=True)
         exp.trials[0].run()
-        self.model = Models.BOTORCH(
+        self.model = Models.BOTORCH_MODULAR(
             # Model bridge kwargs
             experiment=exp,
             data=exp.fetch_data(),
@@ -36,7 +39,6 @@ class DiagnosticTest(TestCase):
             plot = interact_cross_validation_plotly(
                 cv, label_dict=label_dict, autoset_axis_limits=autoset_axis_limits
             )
-            # pyre-ignore [16]
             x_range = plot.layout.updatemenus[0].buttons[0].args[1]["xaxis.range"]
             y_range = plot.layout.updatemenus[0].buttons[0].args[1]["yaxis.range"]
             if autoset_axis_limits:

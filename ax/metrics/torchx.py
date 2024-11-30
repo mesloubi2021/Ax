@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from logging import Logger
 from typing import Any, cast
 
@@ -13,7 +15,7 @@ from ax.core.data import Data
 from ax.core.metric import Metric, MetricFetchE, MetricFetchResult
 from ax.utils.common.logger import get_logger
 from ax.utils.common.result import Err, Ok
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -68,7 +70,7 @@ class TorchXMetric(Metric):
                 )
 
             df_dict = {
-                "arm_name": not_none(cast(Trial, trial).arm).name,
+                "arm_name": none_throws(cast(Trial, trial).arm).name,
                 "trial_index": trial.index,
                 "metric_name": self.name,
                 "mean": mean,

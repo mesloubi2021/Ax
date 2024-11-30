@@ -4,7 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, List, Optional, Set, TYPE_CHECKING
+# pyre-strict
+
+from numbers import Real
+from typing import cast, Optional, TYPE_CHECKING
 
 from ax.core.observation import Observation
 from ax.core.parameter import ChoiceParameter, Parameter, ParameterType, RangeParameter
@@ -26,33 +29,35 @@ class IntRangeToChoice(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
         assert search_space is not None, "IntRangeToChoice requires search space"
         config = config or {}
-        self.max_choices: float = config.get("max_choices", float("inf"))  # pyre-ignore
+        self.max_choices: float = float(
+            cast(Real, (config.get("max_choices", float("inf"))))
+        )
         # Identify parameters that should be transformed
-        self.transform_parameters: Set[str] = {
+        self.transform_parameters: set[str] = {
             p_name
             for p_name, p in search_space.parameters.items()
             if isinstance(p, RangeParameter)
             and p.parameter_type == ParameterType.INT
-            and p.upper - p.lower + 1 <= self.max_choices
+            and p.cardinality() <= self.max_choices
         }
 
     def _transform_search_space(self, search_space: SearchSpace) -> SearchSpace:
-        transformed_parameters: Dict[str, Parameter] = {}
+        transformed_parameters: dict[str, Parameter] = {}
         for p_name, p in search_space.parameters.items():
             if (
                 p_name in self.transform_parameters
                 and isinstance(p, RangeParameter)
                 and p.parameter_type == ParameterType.INT
-                and p.upper - p.lower + 1 <= self.max_choices
+                and p.cardinality() <= self.max_choices
             ):
-                values = list(range(p.lower, p.upper + 1))  # pyre-ignore
+                values = list(range(int(p.lower), int(p.upper) + 1))
                 target_value = (
                     None
                     if p.target_value is None

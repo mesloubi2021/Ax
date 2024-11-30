@@ -1,10 +1,7 @@
-name: Nightly Cron with Pinned BoTorch
+name: Replicate Nightly Cron with Pinned BoTorch
 
 on:
-  schedule:
-    # midnight EST
-    - cron:  '0 5 * * *'
-  # allow this to be scheduled manually in addition to cron
+
   workflow_dispatch:
 
 jobs:
@@ -15,6 +12,7 @@ jobs:
     with:
       pinned_botorch: true
       minimal_dependencies: true
+    secrets: inherit
 
   tests-and-coverage-full:
     name: Tests with pinned BoTorch & full dependencies
@@ -22,6 +20,7 @@ jobs:
     with:
       pinned_botorch: true
       minimal_dependencies: false
+    secrets: inherit
 
   build-tutorials:
     name: Build tutorials with pinned BoTorch

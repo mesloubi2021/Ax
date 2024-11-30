@@ -4,7 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
+# pyre-strict
+
 from unittest import mock
 
 from ax.core.arm import Arm
@@ -36,7 +37,7 @@ def get_modelbridge(
     mock_gen_arms,
     # pyre-fixme[2]: Parameter must be annotated.
     mock_observations_from_data,
-    status_quo_name: Optional[str] = None,
+    status_quo_name: str | None = None,
 ) -> ModelBridge:
     exp = get_experiment()
     modelbridge = ModelBridge(
@@ -141,8 +142,18 @@ class TileObservationsTest(TestCase):
         ]:
             self.assertIn(key, config.data["layout"])
 
+        self.assertEqual(
+            config.data["layout"]["annotations"][0]["text"], "ax_test_metric"
+        )
+
         # Data
         self.assertEqual(config.data["data"][0]["x"], ["0_1", "0_2"])
         self.assertEqual(config.data["data"][0]["y"], [2.0, 2.25])
         self.assertEqual(config.data["data"][0]["type"], "scatter")
         self.assertIn("Arm 0_1", config.data["data"][0]["text"][0])
+
+        label_dict = {"ax_test_metric": "mapped_name"}
+        config = tile_observations(
+            experiment=exp, arm_names=["0_1", "0_2"], rel=False, label_dict=label_dict
+        )
+        self.assertEqual(config.data["layout"]["annotations"][0]["text"], "mapped_name")

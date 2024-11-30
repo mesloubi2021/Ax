@@ -4,13 +4,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 import json
 from abc import abstractmethod
-from functools import reduce
+from collections.abc import Iterable
+from copy import deepcopy
 from hashlib import md5
-from typing import Any, Dict, Iterable, List, Optional, Set, Type, TypeVar, Union
+from io import StringIO
+from typing import Any, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -20,10 +24,14 @@ from ax.utils.common.serialization import (
     extract_init_args,
     SerializationMixin,
     serialize_init_args,
+    TClassDecoderRegistry,
+    TDecoderRegistry,
 )
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 TBaseData = TypeVar("TBaseData", bound="BaseData")
+DF_REPR_MAX_LENGTH = 1000
 
 
 class BaseData(Base, SerializationMixin):
@@ -43,7 +51,7 @@ class BaseData(Base, SerializationMixin):
 
     REQUIRED_COLUMNS = {"arm_name"}
 
-    COLUMN_DATA_TYPES: Dict[str, Any] = {
+    COLUMN_DATA_TYPES: dict[str, Any] = {
         # Ubiquitous columns.
         "arm_name": str,
         # Metric data-related columns.
@@ -51,13 +59,13 @@ class BaseData(Base, SerializationMixin):
         "mean": np.float64,
         "sem": np.float64,
         # Metadata columns available for all subclasses.
-        "trial_index": np.int64,
+        "trial_index": int,
         "start_time": pd.Timestamp,
         "end_time": pd.Timestamp,
-        "n": np.int64,
+        "n": int,
         # Metadata columns available for only some subclasses.
         "frac_nonnull": np.float64,
-        "random_split": np.int64,
+        "random_split": int,
         "fidelities": str,  # Dictionary stored as json
     }
 
@@ -65,8 +73,8 @@ class BaseData(Base, SerializationMixin):
 
     def __init__(
         self: TBaseData,
-        df: Optional[pd.DataFrame] = None,
-        description: Optional[str] = None,
+        df: pd.DataFrame | None = None,
+        description: str | None = None,
     ) -> None:
         """Init Data.
 
@@ -99,11 +107,11 @@ class BaseData(Base, SerializationMixin):
 
     @classmethod
     def _safecast_df(
-        cls: Type[TBaseData],
+        cls: type[TBaseData],
         df: pd.DataFrame,
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        extra_column_types: Optional[Dict[str, Type]] = None,
+        extra_column_types: dict[str, type] | None = None,
     ) -> pd.DataFrame:
         """Function for safely casting df to standard data types.
 
@@ -128,26 +136,26 @@ class BaseData(Base, SerializationMixin):
             ).items()
             if col in df.columns.values
             and not (
-                cls.column_data_types(extra_column_types)[col] is np.int64
+                cls.column_data_types(extra_column_types)[col] is int
                 and df.loc[:, col].isnull().any()
             )
-            and not (coltype is Any)
+            and coltype is not Any
         }
 
         return checked_cast(pd.DataFrame, df.astype(dtype=dtype))
 
     @classmethod
-    def required_columns(cls) -> Set[str]:
+    def required_columns(cls) -> set[str]:
         """Names of columns that must be present in the underlying ``DataFrame``."""
         return cls.REQUIRED_COLUMNS
 
     @classmethod
     def supported_columns(
-        cls, extra_column_names: Optional[Iterable[str]] = None
-    ) -> Set[str]:
+        cls, extra_column_names: Iterable[str] | None = None
+    ) -> set[str]:
         """Names of columns supported (but not necessarily required) by this class."""
         extra_column_names = set(extra_column_names or [])
-        extra_column_types: Dict[str, Any] = {name: Any for name in extra_column_names}
+        extra_column_types: dict[str, Any] = {name: Any for name in extra_column_names}
         return cls.REQUIRED_COLUMNS.union(
             cls.column_data_types(extra_column_types=extra_column_types)
         )
@@ -157,11 +165,11 @@ class BaseData(Base, SerializationMixin):
         cls,
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-        extra_column_types: Optional[Dict[str, Type]] = None,
-        excluded_columns: Optional[Iterable[str]] = None,
+        extra_column_types: dict[str, type] | None = None,
+        excluded_columns: Iterable[str] | None = None,
         # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
         #  `typing.Type` to avoid runtime subscripting errors.
-    ) -> Dict[str, Type]:
+    ) -> dict[str, type]:
         """Type specification for all supported columns."""
         extra_column_types = extra_column_types or {}
         excluded_columns = excluded_columns or []
@@ -176,7 +184,7 @@ class BaseData(Base, SerializationMixin):
 
     @classmethod
     # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-    def serialize_init_args(cls, obj: Any) -> Dict[str, Any]:
+    def serialize_init_args(cls, obj: Any) -> dict[str, Any]:
         """Serialize the class-dependent properties needed to initialize this Data.
         Used for storage and to help construct new similar Data.
         """
@@ -184,7 +192,12 @@ class BaseData(Base, SerializationMixin):
         return serialize_init_args(obj=data)
 
     @classmethod
-    def deserialize_init_args(cls, args: Dict[str, Any]) -> Dict[str, Any]:
+    def deserialize_init_args(
+        cls,
+        args: dict[str, Any],
+        decoder_registry: TDecoderRegistry | None = None,
+        class_decoder_registry: TClassDecoderRegistry | None = None,
+    ) -> dict[str, Any]:
         """Given a dictionary, extract the properties needed to initialize the object.
         Used for storage.
         """
@@ -193,15 +206,14 @@ class BaseData(Base, SerializationMixin):
         if "df" in args and not isinstance(args["df"], pd.DataFrame):
             # NOTE: Need dtype=False, otherwise infers arm_names like
             # "4_1" should be int 41.
-            args["df"] = pd.read_json(args["df"]["value"], dtype=False)
+            args["df"] = pd.read_json(StringIO(args["df"]["value"]), dtype=False)
         return extract_init_args(args=args, class_=cls)
 
     @property
     def true_df(self) -> pd.DataFrame:
-        """Return the `DataFrame` being used as the source of truth (avoid using
+        """Return the ``DataFrame`` being used as the source of truth (avoid using
         except for caching).
         """
-
         return self._df
 
     @property
@@ -223,10 +235,10 @@ class BaseData(Base, SerializationMixin):
             str: The hash of the DataFrame.
 
         """
-        return md5(not_none(self.df.to_json()).encode("utf-8")).hexdigest()
+        return md5(none_throws(self.df.to_json()).encode("utf-8")).hexdigest()
 
     def get_filtered_results(
-        self: TBaseData, **filters: Dict[str, Any]
+        self: TBaseData, **filters: dict[str, Any]
     ) -> pd.DataFrame:
         """Return filtered subset of data.
 
@@ -252,7 +264,7 @@ class BaseData(Base, SerializationMixin):
 
     @classmethod
     def from_multiple(
-        cls: Type[TBaseData],
+        cls: type[TBaseData],
         data: Iterable[TBaseData],
     ) -> TBaseData:
         """Combines multiple objects into one (with the concatenated
@@ -261,15 +273,14 @@ class BaseData(Base, SerializationMixin):
         Args:
             data: Iterable of Ax objects of this class to combine.
         """
-        incompatible_types = {
-            type(datum) for datum in data if not isinstance(datum, cls)
-        }
-        if incompatible_types:
-            raise TypeError(
-                f"All data objects must be instances of class {cls}. Got "
-                f"{incompatible_types}."
-            )
-        dfs = [datum.df for datum in data]
+        dfs = []
+        for datum in data:
+            if not isinstance(datum, cls):
+                raise TypeError(
+                    f"All data objects must be instances of class {cls}. Got "
+                    f"{type(datum)}."
+                )
+            dfs.append(datum.df)
 
         if len(dfs) == 0:
             return cls()
@@ -278,12 +289,12 @@ class BaseData(Base, SerializationMixin):
 
     @classmethod
     def from_evaluations(
-        cls: Type[TBaseData],
-        evaluations: Dict[str, TTrialEvaluation],
+        cls: type[TBaseData],
+        evaluations: dict[str, TTrialEvaluation],
         trial_index: int,
-        sample_sizes: Optional[Dict[str, int]] = None,
-        start_time: Optional[Union[int, str]] = None,
-        end_time: Optional[Union[int, str]] = None,
+        sample_sizes: dict[str, int] | None = None,
+        start_time: int | str | None = None,
+        end_time: int | str | None = None,
     ) -> TBaseData:
         """
         Convert dict of evaluations to Ax data object.
@@ -318,18 +329,18 @@ class BaseData(Base, SerializationMixin):
     @staticmethod
     @abstractmethod
     def _get_records(
-        evaluations: Dict[str, TTrialEvaluation], trial_index: int
-    ) -> List[Dict[str, Any]]:
+        evaluations: dict[str, TTrialEvaluation], trial_index: int
+    ) -> list[dict[str, Any]]:
         pass
 
     @classmethod
     def from_fidelity_evaluations(
-        cls: Type[TBaseData],
-        evaluations: Dict[str, TFidelityTrialEvaluation],
+        cls: type[TBaseData],
+        evaluations: dict[str, TFidelityTrialEvaluation],
         trial_index: int,
-        sample_sizes: Optional[Dict[str, int]] = None,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
+        sample_sizes: dict[str, int] | None = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
     ) -> TBaseData:
         """
         Convert dict of fidelity evaluations to Ax data object.
@@ -363,17 +374,17 @@ class BaseData(Base, SerializationMixin):
     @staticmethod
     @abstractmethod
     def _get_fidelity_records(
-        evaluations: Dict[str, TFidelityTrialEvaluation], trial_index: int
-    ) -> List[Dict[str, Any]]:
+        evaluations: dict[str, TFidelityTrialEvaluation], trial_index: int
+    ) -> list[dict[str, Any]]:
         pass
 
     @staticmethod
     def _add_cols_to_records(
-        records: List[Dict[str, Any]],
-        sample_sizes: Optional[Dict[str, int]] = None,
-        start_time: Optional[Union[int, str]] = None,
-        end_time: Optional[Union[int, str]] = None,
-    ) -> List[Dict[str, Any]]:
+        records: list[dict[str, Any]],
+        sample_sizes: dict[str, int] | None = None,
+        start_time: int | str | None = None,
+        end_time: int | str | None = None,
+    ) -> list[dict[str, Any]]:
         """Adds to records metadata columns that are available for all
         BaseData subclasses.
         """
@@ -399,6 +410,13 @@ class BaseData(Base, SerializationMixin):
         cls = type(self)
         return cls(df=df, **cls.serialize_init_args(self))
 
+    def __repr__(self) -> str:
+        """String representation of the subclass, inheriting from this base."""
+        df_markdown = self.df.to_markdown()
+        if len(df_markdown) > DF_REPR_MAX_LENGTH:
+            df_markdown = df_markdown[:DF_REPR_MAX_LENGTH] + "..."
+        return f"{self.__class__.__name__}(df=\n{df_markdown})"
+
 
 class Data(BaseData):
     """Class storing numerical data for an experiment.
@@ -419,14 +437,14 @@ class Data(BaseData):
     # Note: Although the SEM (standard error of the mean) is a required column in data,
     # downstream models can infer missing SEMs. Simply specify NaN as the SEM value,
     # either in your Metric class or in Data explicitly.
-    REQUIRED_COLUMNS: Set[str] = BaseData.REQUIRED_COLUMNS.union(
+    REQUIRED_COLUMNS: set[str] = BaseData.REQUIRED_COLUMNS.union(
         {"metric_name", "mean", "sem"}
     )
 
     @staticmethod
     def _get_records(
-        evaluations: Dict[str, TTrialEvaluation], trial_index: int
-    ) -> List[Dict[str, Any]]:
+        evaluations: dict[str, TTrialEvaluation], trial_index: int
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "arm_name": name,
@@ -441,8 +459,8 @@ class Data(BaseData):
 
     @staticmethod
     def _get_fidelity_records(
-        evaluations: Dict[str, TFidelityTrialEvaluation], trial_index: int
-    ) -> List[Dict[str, Any]]:
+        evaluations: dict[str, TFidelityTrialEvaluation], trial_index: int
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "arm_name": name,
@@ -458,7 +476,7 @@ class Data(BaseData):
         ]
 
     @property
-    def metric_names(self) -> Set[str]:
+    def metric_names(self) -> set[str]:
         """Set of metric names that appear in the underlying dataframe of
         this object.
         """
@@ -466,8 +484,8 @@ class Data(BaseData):
 
     def filter(
         self,
-        trial_indices: Optional[Iterable[int]] = None,
-        metric_names: Optional[Iterable[str]] = None,
+        trial_indices: Iterable[int] | None = None,
+        metric_names: Iterable[str] | None = None,
     ) -> Data:
         """Construct a new object with the subset of rows corresponding to the
         provided trial indices AND metric names. If either trial_indices or
@@ -483,23 +501,17 @@ class Data(BaseData):
     @staticmethod
     def _filter_df(
         df: pd.DataFrame,
-        trial_indices: Optional[Iterable[int]] = None,
-        metric_names: Optional[Iterable[str]] = None,
+        trial_indices: Iterable[int] | None = None,
+        metric_names: Iterable[str] | None = None,
     ) -> pd.DataFrame:
         trial_indices_mask = (
-            reduce(
-                lambda left, right: left | right,
-                [df["trial_index"] == trial_index for trial_index in trial_indices],
-            )
+            df["trial_index"].isin(trial_indices)
             if trial_indices is not None
             else pd.Series([True] * len(df))
         )
 
         metric_names_mask = (
-            reduce(
-                lambda left, right: left | right,
-                [df["metric_name"] == metric_name for metric_name in metric_names],
-            )
+            df["metric_name"].isin(metric_names)
             if metric_names is not None
             else pd.Series([True] * len(df))
         )
@@ -508,7 +520,7 @@ class Data(BaseData):
 
     @staticmethod
     def from_multiple_data(
-        data: Iterable[Data], subset_metrics: Optional[Iterable[str]] = None
+        data: Iterable[Data], subset_metrics: Iterable[str] | None = None
     ) -> Data:
         """Combines multiple objects into one (with the concatenated
         underlying dataframe).
@@ -528,6 +540,10 @@ class Data(BaseData):
             ]
 
         return data_out
+
+    def clone(self) -> Data:
+        """Returns a new Data object with the same underlying dataframe."""
+        return Data(df=deepcopy(self.df), description=self.description)
 
 
 def set_single_trial(data: Data) -> Data:
@@ -567,10 +583,10 @@ def _ms_epoch_to_isoformat(epoch: int) -> str:
 def custom_data_class(
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    column_data_types: Optional[Dict[str, Type]] = None,
-    required_columns: Optional[Set[str]] = None,
-    time_columns: Optional[Set[str]] = None,
-) -> Type[Data]:
+    column_data_types: dict[str, type] | None = None,
+    required_columns: set[str] | None = None,
+    time_columns: set[str] | None = None,
+) -> type[Data]:
     """Creates a custom data class with additional columns.
 
     All columns and their designations on the base data class are preserved,
@@ -587,13 +603,13 @@ def custom_data_class(
 
     class CustomData(Data):
         @classmethod
-        def required_columns(cls) -> Set[str]:
+        def required_columns(cls) -> set[str]:
             return (required_columns or set()).union(Data.REQUIRED_COLUMNS)
 
         @classmethod
         def column_data_types(
-            cls, extra_column_types: Optional[Dict[str, Type]] = None
-        ) -> Dict[str, Type]:
+            cls, extra_column_types: dict[str, type] | None = None
+        ) -> dict[str, type]:
             return super().column_data_types(
                 {**(extra_column_types or {}), **(column_data_types or {})}
             )

@@ -4,7 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import List, Optional
+# pyre-strict
+
 
 import numpy as np
 from ax.metrics.branin_map import BraninTimestampMapMetric
@@ -22,9 +23,9 @@ class BraninBackendMapMetric(
     def __init__(
         self,
         name: str,
-        param_names: List[str],
+        param_names: list[str],
         noise_sd: float = 0.0,
-        lower_is_better: Optional[bool] = True,
+        lower_is_better: bool | None = True,
         cache_evaluations: bool = True,
         rate: float = 0.5,
         delta_t: float = 1.0,
@@ -54,8 +55,8 @@ class BraninBackendMapMetric(
         self._timestamp = -1
 
     def convert_to_timestamps(
-        self, start_time: Optional[float], end_time: float
-    ) -> List[float]:
+        self, start_time: float | None, end_time: float
+    ) -> list[float]:
         """Given a starting and current time, get the list of intermediate
         timestamps at which we have observations."""
         if start_time is None:

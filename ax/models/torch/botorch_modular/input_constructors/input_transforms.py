@@ -4,13 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 import torch
 from ax.core.search_space import SearchSpaceDigest
-from ax.models.torch.botorch_defaults import _get_batch_shape
 from ax.models.torch.utils import normalize_indices
 from ax.utils.common.typeutils import _argparse_type_encoder
 from botorch.models.transforms.input import (
@@ -20,7 +21,7 @@ from botorch.models.transforms.input import (
     Warp,
 )
 from botorch.utils.containers import SliceContainer
-from botorch.utils.datasets import SupervisedDataset
+from botorch.utils.datasets import RankingDataset, SupervisedDataset
 from botorch.utils.dispatcher import Dispatcher
 
 
@@ -31,11 +32,11 @@ input_transform_argparse = Dispatcher(
 
 @input_transform_argparse.register(InputTransform)
 def _input_transform_argparse_base(
-    input_transform_class: Type[InputTransform],
-    dataset: Optional[SupervisedDataset] = None,
-    search_space_digest: Optional[SearchSpaceDigest] = None,
-    input_transform_options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    input_transform_class: type[InputTransform],
+    dataset: SupervisedDataset | None = None,
+    search_space_digest: SearchSpaceDigest | None = None,
+    input_transform_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Extract the input transform kwargs from the given arguments.
 
@@ -59,11 +60,11 @@ def _input_transform_argparse_base(
 
 @input_transform_argparse.register(Warp)
 def _input_transform_argparse_warp(
-    input_transform_class: Type[Warp],
+    input_transform_class: type[Warp],
     dataset: SupervisedDataset,
     search_space_digest: SearchSpaceDigest,
-    input_transform_options: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    input_transform_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Extract the base input transform kwargs form the given arguments.
 
     Args:
@@ -75,34 +76,27 @@ def _input_transform_argparse_warp(
     Returns:
         A dictionary with input transform kwargs.
     """
-
     input_transform_options = input_transform_options or {}
-    d = dataset.X.shape[-1]
-
+    d = len(dataset.feature_names)
     indices = list(range(d))
-
     task_features = normalize_indices(search_space_digest.task_features, d=d)
 
     for task_feature in sorted(task_features, reverse=True):
         del indices[task_feature]
 
-    batch_shape = _get_batch_shape(dataset.X, dataset.Y)
-
     input_transform_options.setdefault("indices", indices)
-    input_transform_options.setdefault("batch_shape", batch_shape)
-
     return input_transform_options
 
 
 @input_transform_argparse.register(Normalize)
 def _input_transform_argparse_normalize(
-    input_transform_class: Type[Normalize],
+    input_transform_class: type[Normalize],
     dataset: SupervisedDataset,
     search_space_digest: SearchSpaceDigest,
-    input_transform_options: Optional[Dict[str, Any]] = None,
-    torch_device: Optional[torch.device] = None,
-    torch_dtype: Optional[torch.dtype] = None,
-) -> Dict[str, Any]:
+    input_transform_options: dict[str, Any] | None = None,
+    torch_device: torch.device | None = None,
+    torch_dtype: torch.dtype | None = None,
+) -> dict[str, Any]:
     """
     Extract the base input transform kwargs form the given arguments.
     NOTE: This input constructor doesn't support the case when there are
@@ -118,18 +112,15 @@ def _input_transform_argparse_normalize(
     Returns:
         A dictionary with input transform kwargs.
     """
-
     input_transform_options = input_transform_options or {}
-
-    d = dataset.X.shape[-1]
-
+    d = input_transform_options.get("d", len(dataset.feature_names))
     bounds = torch.as_tensor(
         search_space_digest.bounds,
         dtype=torch_dtype,
         device=torch_device,
     ).T
 
-    if isinstance(dataset.X, SliceContainer):
+    if isinstance(dataset, RankingDataset) and isinstance(dataset.X, SliceContainer):
         d = dataset.X.values.shape[-1]
 
     indices = list(range(d))
@@ -160,13 +151,13 @@ def _input_transform_argparse_normalize(
 
 @input_transform_argparse.register(InputPerturbation)
 def _input_transform_argparse_input_perturbation(
-    input_transform_class: Type[InputPerturbation],
+    input_transform_class: type[InputPerturbation],
     search_space_digest: SearchSpaceDigest,
-    dataset: Optional[SupervisedDataset] = None,
-    input_transform_options: Optional[Dict[str, Any]] = None,
-    torch_device: Optional[torch.device] = None,
-    torch_dtype: Optional[torch.dtype] = None,
-) -> Dict[str, Any]:
+    dataset: SupervisedDataset | None = None,
+    input_transform_options: dict[str, Any] | None = None,
+    torch_device: torch.device | None = None,
+    torch_dtype: torch.dtype | None = None,
+) -> dict[str, Any]:
     """Extract the base input transform kwargs form the given arguments.
 
     Args:

@@ -4,26 +4,21 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from __future__ import annotations
+
 import itertools
 import logging
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from datetime import timedelta
 from logging import Logger
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Tuple,
-    TYPE_CHECKING,
-    Union,
-)
+from typing import Any, cast, TYPE_CHECKING
 
 import gpytorch
-
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import plotly.graph_objects as go
 from ax.core.base_trial import TrialStatus
@@ -35,11 +30,17 @@ from ax.core.map_metric import MapMetric
 from ax.core.metric import Metric
 from ax.core.multi_type_experiment import MultiTypeExperiment
 from ax.core.objective import MultiObjective, ScalarizedObjective
+from ax.core.optimization_config import OptimizationConfig
+from ax.core.parameter import Parameter
 from ax.core.trial import BaseTrial
 from ax.early_stopping.strategies.base import BaseEarlyStoppingStrategy
 from ax.exceptions.core import DataRequiredError, UserInputError
 from ax.modelbridge import ModelBridge
-from ax.modelbridge.cross_validation import cross_validate
+from ax.modelbridge.cross_validation import (
+    compute_model_fit_metrics_from_modelbridge,
+    cross_validate,
+)
+from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.modelbridge.random import RandomModelBridge
 from ax.modelbridge.torch import TorchModelBridge
 from ax.plot.contour import interact_contour_plotly
@@ -57,14 +58,15 @@ from ax.plot.scatter import interact_fitted_plotly, plot_multiple_metrics
 from ax.plot.slice import interact_slice_plotly
 from ax.plot.trace import (
     map_data_multiple_metrics_dropdown_plotly,
-    optimization_trace_single_method_plotly,
+    plot_objective_value_vs_trial_index,
 )
 from ax.service.utils.best_point import _derel_opt_config_wrapper, _is_row_feasible
 from ax.service.utils.early_stopping import get_early_stopping_metrics
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
 from ax.utils.sensitivity.sobol_measures import ax_parameter_sens
 from pandas.core.frame import DataFrame
+from pyre_extensions import none_throws
 
 if TYPE_CHECKING:
     from ax.service.scheduler import Scheduler
@@ -81,10 +83,15 @@ CROSS_VALIDATION_CAPTION = (
     "This may hide outliers. You can autoscale the axes to see all trials."
 )
 FEASIBLE_COL_NAME = "is_feasible"
+BASELINE_ARM_NAME = "baseline_arm"
+UNPREDICTABLE_METRICS_MESSAGE = (
+    "The following metric(s) are behaving unpredictably and may be noisy or "
+    "misconfigured: {}. Please check that they are measuring the intended quantity, "
+    "and are expected to vary reliably as a function of your parameters."
+)
 
 
-# pyre-ignore[11]: Annotation `go.Figure` is not defined as a type.
-def _get_cross_validation_plots(model: ModelBridge) -> List[go.Figure]:
+def _get_cross_validation_plots(model: ModelBridge) -> list[go.Figure]:
     cv = cross_validate(model=model)
     return [
         interact_cross_validation_plotly(
@@ -96,14 +103,18 @@ def _get_cross_validation_plots(model: ModelBridge) -> List[go.Figure]:
 def _get_objective_trace_plot(
     experiment: Experiment,
     data: Data,
-    model_transitions: List[int],
-    true_objective_metric_name: Optional[str] = None,
+    true_objective_metric_name: str | None = None,
 ) -> Iterable[go.Figure]:
     if experiment.is_moo_problem:
         return [
             scatter_plot_with_hypervolume_trace_plotly(experiment=experiment),
             *_pairwise_pareto_plotly_scatter(experiment=experiment),
         ]
+    runner = experiment.runner
+    run_metadata_report_keys = None
+    if runner is not None:
+        run_metadata_report_keys = runner.run_metadata_report_keys
+    exp_df = exp_to_df(exp=experiment, run_metadata_fields=run_metadata_report_keys)
 
     optimization_config = experiment.optimization_config
     if optimization_config is None:
@@ -119,25 +130,16 @@ def _get_objective_trace_plot(
     )
 
     plots = [
-        optimization_trace_single_method_plotly(
-            y=np.array([data.df[data.df["metric_name"] == metric_name]["mean"]]),
-            title=f"Best {metric_name} found vs. # of iterations",
-            ylabel=metric_name,
-            model_transitions=model_transitions,
-            # Try and use the metric's lower_is_better property, but fall back on
-            # objective's minimize property if relevent
-            optimization_direction=(
-                (
-                    "minimize"
-                    if experiment.metrics[metric_name].lower_is_better is True
-                    else "maximize"
-                )
-                if experiment.metrics[metric_name].lower_is_better is not None
-                else (
-                    "minimize" if optimization_config.objective.minimize else "maximize"
-                )
+        plot_objective_value_vs_trial_index(
+            exp_df=exp_df,
+            metric_colname=metric_name,
+            minimize=none_throws(
+                optimization_config.objective.minimize
+                if optimization_config.objective.metric.name == metric_name
+                else experiment.metrics[metric_name].lower_is_better
             ),
-            plot_trial_points=True,
+            title=f"Best {metric_name} found vs. trial index",
+            hover_data_colnames=run_metadata_report_keys,
         )
         for metric_name in metric_names
     ]
@@ -148,14 +150,20 @@ def _get_objective_trace_plot(
 def _get_objective_v_param_plots(
     experiment: Experiment,
     model: ModelBridge,
-    max_num_slice_plots: int = 50,
+    importance: None
+    | (dict[str, dict[str, npt.NDArray]] | dict[str, dict[str, float]]) = None,
+    # Chosen to take ~1min on local benchmarks.
+    max_num_slice_plots: int = 200,
+    # Chosen to take ~2min on local benchmarks.
     max_num_contour_plots: int = 20,
-) -> List[go.Figure]:
+) -> list[go.Figure]:
     search_space = experiment.search_space
 
-    range_params = get_range_parameters_from_list(
-        list(search_space.range_parameters.values()), min_num_values=5
-    )
+    range_params = [
+        checked_cast(Parameter, param)
+        for param in search_space.range_parameters.values()
+    ]
+    range_params = get_range_parameters_from_list(range_params, min_num_values=5)
     if len(range_params) < 1:
         # if search space contains no range params
         logger.warning(
@@ -163,8 +171,9 @@ def _get_objective_v_param_plots(
             "`RangeParameter`. Returning an empty list."
         )
         return []
+    range_param_names = [param.name for param in range_params]
     num_range_params = len(range_params)
-    num_metrics = len(experiment.metrics)
+    num_metrics = len(model.metric_names)
     num_slice_plots = num_range_params * num_metrics
     output_plots = []
     if num_slice_plots <= max_num_slice_plots:
@@ -185,32 +194,58 @@ def _get_objective_v_param_plots(
         warning_plot = _warn_and_create_warning_plot(warning_msg=warning_msg)
         output_plots.append(warning_plot)
 
-    num_contour_plots = num_range_params * (num_range_params - 1) * num_metrics
-    if num_range_params > 1 and num_contour_plots <= max_num_contour_plots:
-        # contour plots
-        try:
-            with gpytorch.settings.max_eager_kernel_size(float("inf")):
-                output_plots += [
-                    interact_contour_plotly(
-                        model=not_none(model),
-                        metric_name=metric_name,
-                    )
-                    for metric_name in model.metric_names
-                ]
-        # `mean shape torch.Size` RunTimeErrors, pending resolution of
-        # https://github.com/cornellius-gp/gpytorch/issues/1853
-        except RuntimeError as e:
-            logger.warning(f"Contour plotting failed with error: {e}.")
-    elif num_contour_plots > max_num_contour_plots:
+    # contour plots
+    num_contour_per_metric = max_num_contour_plots // num_metrics
+    if num_contour_per_metric < 2:
         warning_msg = (
-            f"Skipping creation of {num_contour_plots} contour plots since that "
-            f"exceeds <br>`max_num_contour_plots = {max_num_contour_plots}`."
+            "Skipping creation of contour plots since that requires <br>"
+            "`max_num_contour_plots >= 2 * num_metrics`. Got "
+            f"{max_num_contour_plots=} and {num_metrics=}."
             "<br>Users can plot individual contour plots with the <br>python "
             "function ax.plot.contour.plot_contour_plotly."
         )
         # TODO: return a warning here then convert to a plot/message/etc. downstream.
         warning_plot = _warn_and_create_warning_plot(warning_msg=warning_msg)
         output_plots.append(warning_plot)
+    elif num_range_params > 1:
+        # Using n params yields n * (n - 1) contour plots, so we use the number of
+        # params that yields the desired number of plots (solved using quadratic eqn)
+        num_params_per_metric = int(0.5 + (0.25 + num_contour_per_metric) ** 0.5)
+        try:
+            for metric_name in model.metric_names:
+                if importance is not None:
+                    range_params_sens_for_metric = {
+                        k: v
+                        for k, v in importance[metric_name].items()
+                        if k in range_param_names
+                    }
+                    # sort the params by their sensitivity
+                    params_to_use = sorted(
+                        range_params_sens_for_metric,
+                        # pyre-fixme[6]: For 2nd argument expected `None` but got
+                        #  `(x: Any) -> Union[ndarray[typing.Any, typing.Any], float]`.
+                        key=lambda x: range_params_sens_for_metric[x],
+                        reverse=True,
+                    )[:num_params_per_metric]
+                # if sens is not available, just use the first num_features_per_metric.
+                else:
+                    params_to_use = range_param_names[:num_params_per_metric]
+                with gpytorch.settings.max_eager_kernel_size(float("inf")):
+                    output_plots.append(
+                        interact_contour_plotly(
+                            model=none_throws(model),
+                            metric_name=metric_name,
+                            parameters_to_use=params_to_use,
+                        )
+                    )
+                logger.info(
+                    f"Created contour plots for metric {metric_name} and parameters "
+                    f"{params_to_use}."
+                )
+        # `mean shape torch.Size` RunTimeErrors, pending resolution of
+        # https://github.com/cornellius-gp/gpytorch/issues/1853
+        except RuntimeError as e:
+            logger.warning(f"Contour plotting failed with error: {e}.")
     return output_plots
 
 
@@ -219,8 +254,8 @@ def _get_suffix(input_str: str, delim: str = ".", n_chunks: int = 1) -> str:
 
 
 def _get_shortest_unique_suffix_dict(
-    input_str_list: List[str], delim: str = "."
-) -> Dict[str, str]:
+    input_str_list: list[str], delim: str = "."
+) -> dict[str, str]:
     """Maps a list of strings to their shortest unique suffixes
 
     Maps all original strings to the smallest number of chunks, as specified by
@@ -281,14 +316,13 @@ def _get_shortest_unique_suffix_dict(
 
 def get_standard_plots(
     experiment: Experiment,
-    model: Optional[ModelBridge],
-    data: Optional[Data] = None,
-    model_transitions: Optional[List[int]] = None,
-    true_objective_metric_name: Optional[str] = None,
-    early_stopping_strategy: Optional[BaseEarlyStoppingStrategy] = None,
-    limit_points_per_plot: Optional[int] = None,
+    model: ModelBridge | None,
+    data: Data | None = None,
+    true_objective_metric_name: str | None = None,
+    early_stopping_strategy: BaseEarlyStoppingStrategy | None = None,
+    limit_points_per_plot: int | None = None,
     global_sensitivity_analysis: bool = True,
-) -> List[go.Figure]:
+) -> list[go.Figure]:
     """Extract standard plots for single-objective optimization.
 
     Extracts a list of plots from an ``Experiment`` and ``ModelBridge`` of general
@@ -299,9 +333,6 @@ def get_standard_plots(
     Args:
         - experiment: The ``Experiment`` from which to obtain standard plots.
         - model: The ``ModelBridge`` used to suggest trial parameters.
-        - data: If specified, data, to which to fit the model before generating plots.
-        - model_transitions: The arm numbers at which shifts in generation_strategy
-            occur.
         - true_objective_metric_name: Name of the metric to use as the true objective.
         - early_stopping_strategy: Early stopping strategy used throughout the
             experiment; used for visualizing when curves are stopped.
@@ -332,7 +363,7 @@ def get_standard_plots(
             "standard plots."
         )
 
-    objective = not_none(experiment.optimization_config).objective
+    objective = none_throws(experiment.optimization_config).objective
     if isinstance(objective, ScalarizedObjective):
         logger.warning(
             "get_standard_plots does not currently support ScalarizedObjective "
@@ -353,9 +384,6 @@ def get_standard_plots(
             _get_objective_trace_plot(
                 experiment=experiment,
                 data=data,
-                model_transitions=model_transitions
-                if model_transitions is not None
-                else [],
                 true_objective_metric_name=true_objective_metric_name,
             )
         )
@@ -382,12 +410,53 @@ def get_standard_plots(
         except Exception as e:
             logger.exception(f"Scatter plot failed with error: {e}")
 
+        # Compute feature importance ("sensitivity") to select most important
+        # features to plot.
+        sens = None
+        importance_measure = ""
+        if global_sensitivity_analysis and isinstance(model, TorchModelBridge):
+            try:
+                logger.debug("Starting global sensitivity analysis.")
+                sens = ax_parameter_sens(model, order="total")
+                importance_measure = (
+                    '<a href="https://en.wikipedia.org/wiki/Variance-based_'
+                    'sensitivity_analysis">Variance-based sensitivity analysis</a>'
+                )
+                logger.debug("Finished global sensitivity analysis.")
+            except Exception as e:
+                logger.info(
+                    f"Failed to compute signed global feature sensitivities: {e}"
+                    "Trying to get unsigned feature sensitivities."
+                )
+                try:
+                    sens = ax_parameter_sens(model, order="total", signed=False)
+                except Exception as e:
+                    logger.exception(
+                        f"Failed to compute unsigned feature sensitivities: {e}"
+                    )
+        if sens is None:
+            try:
+                sens = {
+                    metric_name: model.feature_importances(metric_name)
+                    for i, metric_name in enumerate(sorted(model.metric_names))
+                }
+            except Exception as e:
+                logger.info(f"Failed to compute feature importances: {e}")
+
         try:
             logger.debug("Starting objective vs. param plots.")
+            # importance is the absolute value of sensitivity.
+            importance = None
+            if sens is not None:
+                importance = {
+                    k: {j: np.absolute(sens[k][j]) for j in sens[k].keys()}
+                    for k in sens.keys()
+                }
             output_plot_list.extend(
                 _get_objective_v_param_plots(
                     experiment=experiment,
                     model=model,
+                    importance=importance,
                 )
             )
             logger.debug("Finished objective vs. param plots.")
@@ -402,19 +471,6 @@ def get_standard_plots(
             logger.exception(f"Cross-validation plot failed with error: {e}")
 
         # sensitivity plot
-        sens = None
-        importance_measure = ""
-        try:
-            if global_sensitivity_analysis and isinstance(model, TorchModelBridge):
-                logger.debug("Starting global sensitivity analysis.")
-                sens = ax_parameter_sens(model, order="total")
-                importance_measure = (
-                    '<a href="https://en.wikipedia.org/wiki/Variance-based_'
-                    'sensitivity_analysis">Variance-based sensitivity analysis</a>'
-                )
-                logger.debug("Finished global sensitivity analysis.")
-        except Exception as e:
-            logger.info(f"Failed to compute global feature sensitivities: {e}")
         try:
             logger.debug("Starting feature importance plot.")
             feature_importance_plot = plot_feature_importance_by_feature_plotly(
@@ -430,7 +486,6 @@ def get_standard_plots(
             )
             logger.debug("Finished feature importance plot.")
             feature_importance_plot.layout.title = "[ADVANCED] " + str(
-                # pyre-fixme[16]: go.Figure has no attribute `layout`
                 feature_importance_plot.layout.title.text
             )
             output_plot_list.append(feature_importance_plot)
@@ -471,8 +526,10 @@ def get_standard_plots(
 
 
 def _transform_progression_to_walltime(
-    progressions: np.ndarray, exp_df: pd.DataFrame, trial_idx: int
-) -> Optional[np.ndarray]:
+    progressions: npt.NDArray,
+    exp_df: pd.DataFrame,
+    trial_idx: int,
+) -> npt.NDArray | None:
     try:
         trial_df = exp_df[exp_df["trial_index"] == trial_idx]
         time_run_started = trial_df["time_run_started"].iloc[0]
@@ -492,10 +549,10 @@ def _get_curve_plot_dropdown(
     experiment: Experiment,
     map_metrics: Iterable[MapMetric],
     data: MapData,
-    early_stopping_strategy: Optional[BaseEarlyStoppingStrategy],
+    early_stopping_strategy: BaseEarlyStoppingStrategy | None,
     by_walltime: bool = False,
-    limit_points_per_plot: Optional[int] = None,
-) -> Optional[go.Figure]:
+    limit_points_per_plot: int | None = None,
+) -> go.Figure | None:
     """Plot curve metrics by either progression or walltime.
 
     Args:
@@ -594,7 +651,7 @@ def _get_curve_plot_dropdown(
 def _merge_trials_dict_with_df(
     df: pd.DataFrame,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
-    trials_dict: Dict[int, Any],
+    trials_dict: dict[int, Any],
     column_name: str,
     always_include_field_column: bool = False,
 ) -> None:
@@ -621,15 +678,11 @@ def _merge_trials_dict_with_df(
         if not all(
             v is not None for v in trials_dict.values()
         ):  # not present for all trials
-            logger.warning(
+            logger.info(
                 f"Column {column_name} missing for some trials. "
                 "Filling with None when missing."
             )
         df[column_name] = [trials_dict[trial_index] for trial_index in df.trial_index]
-    else:
-        logger.warning(
-            f"Column {column_name} missing for all trials. " "Not appending column."
-        )
 
 
 def _get_generation_method_str(trial: BaseTrial) -> str:
@@ -638,7 +691,7 @@ def _get_generation_method_str(trial: BaseTrial) -> str:
         return trial_generation_property
 
     generation_methods = {
-        not_none(generator_run._model_key)
+        none_throws(generator_run._model_key)
         for generator_run in trial.generator_runs
         if generator_run._model_key is not None
     }
@@ -655,8 +708,8 @@ def _get_generation_method_str(trial: BaseTrial) -> str:
 def _merge_results_if_no_duplicates(
     arms_df: pd.DataFrame,
     results: pd.DataFrame,
-    key_components: List[str],
-    metrics: List[Metric],
+    key_components: list[str],
+    metrics: list[Metric],
 ) -> DataFrame:
     """Formats ``data.df`` and merges it with ``arms_df`` if all of the following are
     True:
@@ -711,16 +764,36 @@ def _merge_results_if_no_duplicates(
     return pd.merge(metrics_df, arms_df, on=key_components, how="outer")
 
 
+def _get_relative_results(
+    results_df: pd.DataFrame, status_quo_arm_name: str
+) -> pd.DataFrame:
+    """Returns a dataframe with relative results, i.e. % change in metric values
+    relative to the status quo arm.
+    """
+    baseline_df = results_df[results_df["arm_name"] == status_quo_arm_name]
+    relative_results_df = pd.merge(
+        results_df,
+        baseline_df[["metric_name", "mean"]],
+        on="metric_name",
+        suffixes=("", "_baseline"),
+    )
+    relative_results_df["mean"] = (
+        1.0 * relative_results_df["mean"] / relative_results_df["mean_baseline"] - 1.0
+    ) * 100.0
+    relative_results_df["metric_name"] = relative_results_df["metric_name"] + "_%CH"
+    return relative_results_df
+
+
 def exp_to_df(
     exp: Experiment,
-    metrics: Optional[List[Metric]] = None,
-    run_metadata_fields: Optional[List[str]] = None,
-    trial_properties_fields: Optional[List[str]] = None,
-    trial_attribute_fields: Optional[List[str]] = None,
-    additional_fields_callables: Optional[
-        Dict[str, Callable[[Experiment], Dict[int, Union[str, float]]]]
-    ] = None,
+    metrics: list[Metric] | None = None,
+    run_metadata_fields: list[str] | None = None,
+    trial_properties_fields: list[str] | None = None,
+    trial_attribute_fields: list[str] | None = None,
+    additional_fields_callables: None
+    | (dict[str, Callable[[Experiment], dict[int, str | float]]]) = None,
     always_include_field_columns: bool = False,
+    show_relative_metrics: bool = False,
     **kwargs: Any,
 ) -> pd.DataFrame:
     """Transforms an experiment to a DataFrame with rows keyed by trial_index
@@ -751,15 +824,26 @@ def exp_to_df(
         always_include_field_columns: If `True`, even if all trials have missing
             values, include field columns anyway. Such columns are by default
             omitted (False).
+        show_relative_metrics: If `True`, show % metric changes relative to the provided
+            status quo arm. If no status quo arm is provided, raise a warning and show
+            raw metric values. If `False`, show raw metric values (default).
     Returns:
         DataFrame: A dataframe of inputs, metadata and metrics by trial and arm (and
         ``map_keys``, if present). If no trials are available, returns an empty
         dataframe. If no metric ouputs are available, returns a dataframe of inputs and
-        metadata.
+        metadata. Columns include:
+            * trial_index
+            * arm_name
+            * trial_status
+            * generation_method
+            * any elements of exp.runner.run_metadata_report_keys that are present in
+              the trial.run_metadata of each trial
+            * one column per metric (named after the metric.name)
+            * one column per parameter (named after the parameter.name)
     """
 
     if len(kwargs) > 0:
-        logger.warn(
+        logger.warning(
             "`kwargs` in exp_to_df is deprecated. Please remove extra arguments."
         )
 
@@ -793,9 +877,9 @@ def exp_to_df(
     # Add `FEASIBLE_COL_NAME` column according to constraints if any.
     if (
         exp.optimization_config is not None
-        and len(not_none(exp.optimization_config).all_constraints) > 0
+        and len(none_throws(exp.optimization_config).all_constraints) > 0
     ):
-        optimization_config = not_none(exp.optimization_config)
+        optimization_config = none_throws(exp.optimization_config)
         try:
             if any(oc.relative for oc in optimization_config.all_constraints):
                 optimization_config = _derel_opt_config_wrapper(
@@ -808,6 +892,23 @@ def exp_to_df(
             )
         except (KeyError, ValueError, DataRequiredError) as e:
             logger.warning(f"Feasibility calculation failed with error: {e}")
+
+    # Calculate relative metrics if `show_relative_metrics` is True.
+    if show_relative_metrics:
+        if exp.status_quo is None:
+            logger.warning(
+                "No status quo arm found. Showing raw metric values instead of "
+                "relative metric values."
+            )
+        else:
+            status_quo_arm_name = exp.status_quo.name
+            try:
+                results = _get_relative_results(results, status_quo_arm_name)
+            except Exception:
+                logger.warning(
+                    "Failed to calculate relative metrics. Showing raw metric values "
+                    "instead of relative metric values."
+                )
 
     # If arms_df is empty, return empty results (legacy behavior)
     if len(arms_df.index) == 0:
@@ -827,6 +928,26 @@ def exp_to_df(
     trial_to_status = {index: trial.status.name for index, trial in trials}
     _merge_trials_dict_with_df(
         df=arms_df, trials_dict=trial_to_status, column_name="trial_status"
+    )
+
+    # Add trial reason for failed or abandoned trials
+    trial_to_reason = {
+        index: (
+            f"{trial.failed_reason[:15]}..."
+            if trial.status.is_failed and trial.failed_reason is not None
+            else (
+                f"{trial.abandoned_reason[:15]}..."
+                if trial.status.is_abandoned and trial.abandoned_reason is not None
+                else None
+            )
+        )
+        for index, trial in trials
+    }
+
+    _merge_trials_dict_with_df(
+        df=arms_df,
+        trials_dict=trial_to_reason,
+        column_name="reason",
     )
 
     # Add generation_method, accounting for the generic case that generator_runs is of
@@ -909,24 +1030,22 @@ def exp_to_df(
         metrics=metrics or list(exp.metrics.values()),
     )
 
-    exp_df = not_none(not_none(exp_df).sort_values(["trial_index"]))
+    exp_df = none_throws(none_throws(exp_df).sort_values(["trial_index"]))
     initial_column_order = (
-        ["trial_index", "arm_name", "trial_status", "generation_method"]
+        ["trial_index", "arm_name", "trial_status", "reason", "generation_method"]
         + (run_metadata_fields or [])
         + (trial_properties_fields or [])
+        + ([FEASIBLE_COL_NAME] if FEASIBLE_COL_NAME in exp_df.columns else [])
     )
     for column_name in reversed(initial_column_order):
         if column_name in exp_df.columns:
-            # pyre-ignore[6]: In call `DataFrame.insert`, for 3rd positional argument,
-            # expected `Union[int, Series, Variable[ArrayLike <: [ExtensionArray,
-            # ndarray]]]` but got `Union[DataFrame, Series]`]
             exp_df.insert(0, column_name, exp_df.pop(column_name))
     return exp_df.reset_index(drop=True)
 
 
 def compute_maximum_map_values(
-    experiment: Experiment, map_key: Optional[str] = None
-) -> Dict[int, float]:
+    experiment: Experiment, map_key: str | None = None
+) -> dict[int, float]:
     """A function that returns a map from trial_index to the maximum map value
     reached. If map_key is not specified, it uses the first map_key."""
     data = experiment.lookup_data()
@@ -954,9 +1073,9 @@ def compute_maximum_map_values(
 
 def _pairwise_pareto_plotly_scatter(
     experiment: Experiment,
-    metric_names: Optional[Tuple[str, str]] = None,
-    reference_point: Optional[Tuple[float, float]] = None,
-    minimize: Optional[Union[bool, Tuple[bool, bool]]] = None,
+    metric_names: tuple[str, str] | None = None,
+    reference_point: tuple[float, float] | None = None,
+    minimize: bool | tuple[bool, bool] | None = None,
 ) -> Iterable[go.Figure]:
     metric_name_pairs = _get_metric_name_pairs(experiment=experiment)
     return [
@@ -970,17 +1089,17 @@ def _pairwise_pareto_plotly_scatter(
 
 def _get_metric_name_pairs(
     experiment: Experiment, use_first_n_metrics: int = 4
-) -> Iterable[Tuple[str, str]]:
+) -> Iterable[tuple[str, str]]:
     optimization_config = _validate_experiment_and_get_optimization_config(
         experiment=experiment
     )
-    if not_none(optimization_config).is_moo_problem:
+    if none_throws(optimization_config).is_moo_problem:
         multi_objective = checked_cast(
-            MultiObjective, not_none(optimization_config).objective
+            MultiObjective, none_throws(optimization_config).objective
         )
         metric_names = [obj.metric.name for obj in multi_objective.objectives]
         if len(metric_names) > use_first_n_metrics:
-            logger.warning(
+            logger.info(
                 f"Got `metric_names = {metric_names}` of length {len(metric_names)}. "
                 f"Creating pairwise Pareto plots for the first `use_n_metrics = "
                 f"{use_first_n_metrics}` of these and disregarding the remainder."
@@ -990,18 +1109,17 @@ def _get_metric_name_pairs(
         return metric_name_pairs
     raise UserInputError(
         "Inference of `metric_names` failed. Expected `MultiObjective` but "
-        f"got {not_none(optimization_config).objective}. Please provide an experiment "
-        "with a MultiObjective `optimization_config`."
+        f"got {none_throws(optimization_config).objective}. Please provide an "
+        "experiment with a MultiObjective `optimization_config`."
     )
 
 
 def _pareto_frontier_scatter_2d_plotly(
     experiment: Experiment,
-    metric_names: Optional[Tuple[str, str]] = None,
-    reference_point: Optional[Tuple[float, float]] = None,
-    minimize: Optional[Union[bool, Tuple[bool, bool]]] = None,
+    metric_names: tuple[str, str] | None = None,
+    reference_point: tuple[float, float] | None = None,
+    minimize: bool | tuple[bool, bool] | None = None,
 ) -> go.Figure:
-
     # Determine defaults for unspecified inputs using `optimization_config`
     metric_names, reference_point, minimize = _pareto_frontier_plot_input_processing(
         experiment=experiment,
@@ -1010,6 +1128,17 @@ def _pareto_frontier_scatter_2d_plotly(
         minimize=minimize,
     )
 
+    return pareto_frontier_scatter_2d_plotly(
+        experiment, metric_names, reference_point, minimize
+    )
+
+
+def pareto_frontier_scatter_2d_plotly(
+    experiment: Experiment,
+    metric_names: tuple[str, str],
+    reference_point: tuple[float, float] | None = None,
+    minimize: bool | tuple[bool, bool] | None = None,
+) -> go.Figure:
     df = exp_to_df(experiment)
     Y = df[list(metric_names)].to_numpy()
     Y_pareto = (
@@ -1057,8 +1186,8 @@ def _objective_vs_true_objective_scatter(
 # TODO: may want to have a way to do this with a plot_fn
 # that returns a list of plots, such as get_standard_plots
 def get_figure_and_callback(
-    plot_fn: Callable[["Scheduler"], go.Figure]
-) -> Tuple[go.Figure, Callable[["Scheduler"], None]]:
+    plot_fn: Callable[["Scheduler"], go.Figure],
+) -> tuple[go.Figure, Callable[["Scheduler"], None]]:
     """
     Produce a figure and a callback for updating the figure in place.
 
@@ -1092,8 +1221,16 @@ def get_figure_and_callback(
                 "Skipping plot update."
             )
             return
-        fig.update(data=new_fig._data, layout=new_fig._layout, overwrite=True)
+        fig.update(
+            data=new_fig._data,
+            layout=new_fig._layout,
+            overwrite=True,
+        )
 
+    # pyre-fixme[7]: Expected `Tuple[Figure, typing.Callable[[Scheduler], None]]`
+    #  but got `Tuple[FigureWidget,
+    #  typing.Callable(get_figure_and_callback._update_fig_in_place)[[Named(scheduler,
+    #  Scheduler)], None]]`.
     return fig, _update_fig_in_place
 
 
@@ -1105,3 +1242,349 @@ def _warn_and_create_warning_plot(warning_msg: str) -> go.Figure:
         .update_xaxes(showgrid=False, showticklabels=False, zeroline=False)
         .update_yaxes(showgrid=False, showticklabels=False, zeroline=False)
     )
+
+
+def _format_comparison_string(
+    comparison_arm_name: str,
+    baseline_arm_name: str,
+    objective_name: str,
+    percent_change: float,
+    baseline_value: float,
+    comparison_value: float,
+    digits: int,
+) -> str:
+    return (
+        "**Metric "
+        f"`{objective_name}` improved {percent_change:.{digits}f}%** "
+        f"from `{baseline_value:.{digits}f}` in arm `'{baseline_arm_name}'` "
+        f"to `{comparison_value:.{digits}f}` in arm `'{comparison_arm_name}'`.\n "
+    )
+
+
+def _construct_comparison_message(
+    objective_name: str,
+    objective_minimize: bool,
+    baseline_arm_name: str,
+    baseline_value: float,
+    comparison_arm_name: str,
+    comparison_value: float,
+    digits: int = 2,
+) -> str | None:
+    # TODO: allow for user configured digits value
+    if baseline_value == 0:
+        logger.info(
+            "compare_to_baseline: baseline has value of 0"
+            + ", can't compute percent change."
+        )
+        return None
+
+    if (objective_minimize and (baseline_value <= comparison_value)) or (
+        not objective_minimize and (baseline_value >= comparison_value)
+    ):
+        logger.debug(
+            f"compare_to_baseline: comparison arm {comparison_arm_name}"
+            + f" did not beat baseline arm {baseline_arm_name}. "
+        )
+        return None
+    percent_change = ((abs(comparison_value - baseline_value)) / baseline_value) * 100
+
+    return _format_comparison_string(
+        comparison_arm_name=comparison_arm_name,
+        baseline_arm_name=baseline_arm_name,
+        objective_name=objective_name,
+        percent_change=percent_change,
+        baseline_value=baseline_value,
+        comparison_value=comparison_value,
+        digits=digits,
+    )
+
+
+def _build_result_tuple(
+    objective_name: str,
+    objective_minimize: bool,
+    baseline_arm_name: str,
+    baseline_value: float,
+    comparison_row: pd.DataFrame,
+) -> tuple[str, bool, str, float, str, float]:
+    """Formats inputs into a tuple for use in creating
+    the comparison message.
+
+    Returns:
+        (metric_name,
+        minimize,
+        baseline_arm_name,
+        baseline_value,
+        comparison_arm_name,
+        comparison_arm_value,)
+    """
+    comparison_arm_name = checked_cast(str, comparison_row["arm_name"])
+    comparison_value = checked_cast(float, comparison_row[objective_name])
+
+    result = (
+        objective_name,
+        objective_minimize,
+        baseline_arm_name,
+        baseline_value,
+        comparison_arm_name,
+        comparison_value,
+    )
+    return result
+
+
+def select_baseline_arm(
+    experiment: Experiment, arms_df: pd.DataFrame, baseline_arm_name: str | None
+) -> tuple[str, bool]:
+    """
+    Choose a baseline arm that is found in arms_df
+
+    Returns:
+        Tuple:
+            baseline_arm_name if valid baseline exists
+            true when baseline selected from first arm of sweep
+        raise ValueError if no valid baseline found
+    """
+
+    if baseline_arm_name:
+        if arms_df[arms_df["arm_name"] == baseline_arm_name].empty:
+            raise ValueError(
+                f"compare_to_baseline: baseline row: {baseline_arm_name=}"
+                " not found in arms"
+            )
+        return baseline_arm_name, False
+
+    else:
+        if (
+            experiment.status_quo
+            and not arms_df[
+                arms_df["arm_name"] == none_throws(experiment.status_quo).name
+            ].empty
+        ):
+            baseline_arm_name = none_throws(experiment.status_quo).name
+            return baseline_arm_name, False
+
+        if (
+            experiment.trials
+            and experiment.trials[0].arms
+            and not arms_df[
+                arms_df["arm_name"] == experiment.trials[0].arms[0].name
+            ].empty
+        ):
+            baseline_arm_name = experiment.trials[0].arms[0].name
+            return baseline_arm_name, True
+        else:
+            raise ValueError("compare_to_baseline: could not find valid baseline arm")
+
+
+def maybe_extract_baseline_comparison_values(
+    experiment: Experiment,
+    optimization_config: OptimizationConfig | None,
+    comparison_arm_names: list[str] | None,
+    baseline_arm_name: str | None,
+) -> list[tuple[str, bool, str, float, str, float]] | None:
+    """
+    Extracts the baseline values from the experiment, for use in
+    comparing the baseline arm to the optimal results.
+    Requires the user specifies the names of the arms to compare to.
+
+    Returns:
+        List of tuples containing:
+        (metric_name,
+        minimize,
+        baseline_arm_name,
+        baseline_value,
+        comparison_arm_name,
+        comparison_arm_value,
+        )
+    """
+    # TODO: incorporate model uncertainty when available
+    # TODO: extract and use best arms if comparison_arm_names is not provided.
+    #   Can do this automatically using optimization_config.
+    if not comparison_arm_names:
+        logger.info(
+            "compare_to_baseline: comparison_arm_names not provided. Returning None."
+        )
+        return None
+    if not optimization_config:
+        if experiment.optimization_config is None:
+            logger.info(
+                "compare_to_baseline: optimization_config neither"
+                + " provided in inputs nor present on experiment."
+            )
+            return None
+        optimization_config = experiment.optimization_config
+
+    arms_df = exp_to_df(experiment)
+    if arms_df is None:
+        logger.info("compare_to_baseline: arms_df is None.")
+        return None
+
+    comparison_arm_df = arms_df[arms_df["arm_name"].isin(comparison_arm_names)]
+
+    if comparison_arm_df is None or len(comparison_arm_df) == 0:
+        logger.info("compare_to_baseline: comparison_arm_df has no rows.")
+        return None
+
+    try:
+        baseline_arm_name, _ = select_baseline_arm(
+            experiment=experiment, arms_df=arms_df, baseline_arm_name=baseline_arm_name
+        )
+    except Exception as e:
+        logger.info(f"compare_to_baseline: could not select baseline arm. Reason: {e}")
+        return None
+
+    baseline_rows = arms_df[arms_df["arm_name"] == baseline_arm_name]
+
+    if experiment.is_moo_problem:
+        multi_objective = checked_cast(MultiObjective, optimization_config.objective)
+        result_list = []
+        for objective in multi_objective.objectives:
+            name = objective.metric.name
+            minimize = objective.minimize
+            opt_index = (
+                comparison_arm_df[name].idxmin()
+                if minimize
+                else comparison_arm_df[name].idxmax()
+            )
+            comparison_row = arms_df.iloc[opt_index]
+            baseline_value = baseline_rows.iloc[0][name]
+
+            result_tuple = _build_result_tuple(
+                objective_name=name,
+                objective_minimize=minimize,
+                baseline_arm_name=baseline_arm_name,
+                baseline_value=baseline_value,
+                comparison_row=comparison_row,
+            )
+
+            result_list.append(result_tuple)
+        return result_list if result_list else None
+
+    objective_name = optimization_config.objective.metric.name
+    baseline_value = baseline_rows.iloc[0][objective_name]
+    comparison_row = comparison_arm_df.iloc[0]
+
+    return [
+        _build_result_tuple(
+            objective_name=objective_name,
+            objective_minimize=optimization_config.objective.minimize,
+            baseline_arm_name=baseline_arm_name,
+            baseline_value=baseline_value,
+            comparison_row=comparison_row,
+        )
+    ]
+
+
+def compare_to_baseline_impl(
+    comparison_list: list[tuple[str, bool, str, float, str, float]],
+) -> str | None:
+    """Implementation of compare_to_baseline, taking in a
+    list of arm comparisons.
+    Can be used directly with the output of
+    'maybe_extract_baseline_comparison_values'"""
+    result_message = ""
+    if len(comparison_list) > 1:
+        result_message = (
+            "Below is the greatest improvement, if any,"
+            " achieved for each objective metric \n"
+        )
+
+    for _, result_tuple in enumerate(comparison_list):
+        comparison_message = _construct_comparison_message(*result_tuple)
+        if comparison_message:
+            result_message = (
+                result_message
+                + (" \n* " if len(comparison_list) > 1 else "")
+                + none_throws(comparison_message)
+            )
+
+    return result_message if result_message else None
+
+
+def compare_to_baseline(
+    experiment: Experiment,
+    optimization_config: OptimizationConfig | None,
+    comparison_arm_names: list[str] | None,
+    baseline_arm_name: str | None = None,
+) -> str | None:
+    """Calculate metric improvement of the experiment against baseline.
+    Returns the message(s) added to markdown_messages."""
+
+    comparison_list = maybe_extract_baseline_comparison_values(
+        experiment=experiment,
+        optimization_config=optimization_config,
+        comparison_arm_names=comparison_arm_names,
+        baseline_arm_name=baseline_arm_name,
+    )
+    if not comparison_list:
+        return None
+    comparison_list = none_throws(comparison_list)
+    return compare_to_baseline_impl(comparison_list)
+
+
+def warn_if_unpredictable_metrics(
+    experiment: Experiment,
+    generation_strategy: GenerationStrategy,
+    model_fit_threshold: float,
+    metric_names: list[str] | None = None,
+    model_fit_metric_name: str = "coefficient_of_determination",
+) -> str | None:
+    """Warn if any optimization config metrics are considered unpredictable,
+    i.e., their coefficient of determination is less than model_fit_threshold.
+    Args:
+        experiment: The experiment containing the data and optimization_config.
+            If there is no optimization config, this function checks all metrics
+            attached to the experiment.
+        generation_strategy: The generation strategy containing the model.
+        model_fit_threshold: If a model's coefficient of determination is below
+            this threshold, that metric is considered unpredictable.
+        metric_names: If specified, only check these metrics.
+        model_fit_metric_name: Name of the metric to apply the model fit threshold to.
+
+    Returns:
+        A string warning the user about unpredictable metrics, if applicable.
+    """
+    # Get fit quality dict.
+    model_bridge = generation_strategy.model  # Optional[ModelBridge]
+    if model_bridge is None:  # Need to re-fit the model.
+        generation_strategy._fit_current_model(data=None)
+        model_bridge = cast(ModelBridge, generation_strategy.model)
+    if isinstance(model_bridge, RandomModelBridge):
+        logger.debug(
+            "Current modelbridge on GenerationStrategy is RandomModelBridge. "
+            "Not checking metric predictability."
+        )
+        return None
+    model_fit_dict = compute_model_fit_metrics_from_modelbridge(
+        model_bridge=model_bridge,
+        generalization=True,  # use generalization metrics for user warning
+        untransform=False,
+    )
+    fit_quality_dict = model_fit_dict[model_fit_metric_name]
+
+    # Extract salient metrics from experiment.
+    if metric_names is None:
+        if experiment.optimization_config is None:
+            metric_names = list(experiment.metrics.keys())
+        else:
+            metric_names = list(
+                none_throws(experiment.optimization_config).metrics.keys()
+            )
+    else:
+        # Raise a ValueError if any metric names are invalid.
+        bad_metric_names = set(metric_names) - set(experiment.metrics.keys())
+        if len(bad_metric_names) > 0:
+            raise ValueError(
+                f"Invalid metric names: {bad_metric_names}. Please only use "
+                "metric_names that are available on the present experiment, "
+                f"which are: {list(experiment.metrics.keys())}."
+            )
+
+    # Flag metrics whose coefficient of determination is below the threshold.
+    unpredictable_metrics = {
+        k: v
+        for k, v in fit_quality_dict.items()
+        if k in metric_names and v < model_fit_threshold
+    }
+
+    if len(unpredictable_metrics) > 0:
+        return UNPREDICTABLE_METRICS_MESSAGE.format(list(unpredictable_metrics.keys()))

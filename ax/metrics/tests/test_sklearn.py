@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from contextlib import ExitStack
 from enum import Enum
 from math import sqrt
@@ -19,7 +21,8 @@ from sklearn.ensemble import RandomForestClassifier
 
 
 class DummyEnum(Enum):
-    DUMMY: str = "dummy"
+    _value_: str
+    DUMMY = "dummy"
 
 
 class SklearnMetricTest(TestCase):

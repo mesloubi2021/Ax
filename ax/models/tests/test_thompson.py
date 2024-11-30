@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 import numpy as np
 from ax.exceptions.model import ModelError
@@ -13,6 +15,7 @@ from ax.utils.common.testutils import TestCase
 
 class ThompsonSamplerTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.Xs = [[[1, 1], [2, 2], [3, 3], [4, 4]]]  # 4 arms, each of dimensionality 2
         self.Ys = [[1, 2, 3, 4]]
         self.Yvars = [[1, 1, 1, 1]]

@@ -30,13 +30,41 @@ outlined on that page and do not file a public issue.
 The Ax codebase has a high standard for code quality, which we enforce via Travis.
 
 ### Coding Style
-We use the [`Black` code formatter](https://github.com/ambv/black) for all Python files. You can install the latest release via `pip install black` and run it over the library via `black ax`.
+We use the [`Ruff` code formatter](https://docs.astral.sh/ruff/formatter/) for all Python files. You can install the latest release via `pip install ruff` and run it over the library via `ruff format ax`.
 
 ### Unit Tests
 The majority of our code is covered by unit tests and we are working to get to 100% code coverage. Please ensure that new code is covered by unit tests. To run all unit tests, we recommend installing pytest using `pip install pytest` and running `pytest -ra` from the root of the Ax repo. To get coverage, `pip install pytest-cov` and run `pytest -ra --cov=ax`.
 
-### Linting
-Run the linter via `flake8` (`pip install flake8`) from the root of the Ax repository. Note that we have a [custom flake8 configuration](https://github.com/facebook/Ax/blob/main/.flake8).
+#### Code Style
+
+Ax uses [ufmt](https://github.com/omnilib/ufmt) to enforce consistent code
+formatting (based on [black](https://github.com/ambv/black)) and import sorting
+(based on [µsort](https://github.com/facebook/usort)) across the code base.
+Install via `pip install ufmt`, and auto-format and auto-sort by running
+
+```bash
+ufmt format .
+```
+
+from the repository root.
+
+#### Flake8 linting
+
+Ax uses `flake8` for linting. To run the linter locally, install `flake8`
+via `pip install flake8`, and then run
+
+```bash
+flake8 .
+```
+
+from the repository root.
+
+#### Pre-commit hooks
+
+Contributors can use [pre-commit](https://pre-commit.com/) to run `ufmt` and
+`flake8` as part of the commit process. To install the hooks, install `pre-commit`
+via `pip install pre-commit` and run `pre-commit install` from the repository
+root.
 
 ### Static Type Checking
 We use [Pyre](https://pyre-check.org/) for static type checking and require code to be fully type annotated. At the moment, static type checking is not supported within Travis.
@@ -70,7 +98,7 @@ Additional details:
 
 * This is the unversioned site built off of the current repository. Versioning is much more complex, and is generally not necessary for testing the site. Versioning is automatically handled when publishing the site to `gh-pages`.
 * Skipping Sphinx API & tutorials: to build the site without running Sphinx or compiling the tutorials, pass the `-o` flag to the `make_docs.sh` script. This is especially useful when you want to iterate quickly on making changes to the Docusaurus config and you've already run Sphinx and tutorial generation (the outputs are still in `website` subdirectory and will be picked up).
-* Tutorials: we embed tutorials written in Jupyter notebooks into the site. By default, these tutorials are converted to HTML without execution. However, you can execute all tutorials via `./scripts/make_docs.sh -t`, optionally specifying the Jupyter kernel to use via `-k [kernel_name]`. If you do execute the tutorials, please keep in mind that the version of Ax you have installed should match the version of Ax you're trying to build tutorials for.
+* Tutorials: we embed tutorials written in Jupyter notebooks into the site. By default, these tutorials are converted to HTML without execution. However, you can execute all tutorials via `./scripts/make_docs.sh -t`. If you do execute the tutorials, please keep in mind that the version of Ax you have installed should match the version of Ax you're trying to build tutorials for.
 
 ### Publishing
 The site is hosted as a GitHub page (on the `gh-pages` branch). We build the [latest version](https://ax.dev/versions/latest/index.html) of the site with every commit to the `main` branch via GitHub Actions. The latest version of the site can be manually updated using `./scripts/publish_site.sh` (assuming proper credentials).

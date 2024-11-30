@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest import mock
 
 from ax.core.base_trial import BaseTrial
@@ -20,6 +22,7 @@ class DummyRunner(Runner):
 
 class RunnerTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.dummy_runner = DummyRunner()
         self.trials = [get_trial(), get_batch_trial()]
 
@@ -46,6 +49,10 @@ class RunnerTest(TestCase):
     def test_base_runner_poll_trial_status(self) -> None:
         with self.assertRaises(NotImplementedError):
             self.dummy_runner.poll_trial_status(trials=self.trials)
+
+    def test_base_runner_poll_exception(self) -> None:
+        with self.assertRaises(NotImplementedError):
+            self.dummy_runner.poll_exception(trial=self.trials[0])
 
     def test_poll_available_capacity(self) -> None:
         self.assertEqual(self.dummy_runner.poll_available_capacity(), -1)

@@ -4,10 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 import abc
-from typing import Optional
 
 from ax.utils.common.equality import equality_typechecker, object_attribute_dicts_equal
 
@@ -17,10 +18,10 @@ class Base:
     property for SQA storage.
     """
 
-    _db_id: Optional[int] = None
+    _db_id: int | None = None
 
     @property
-    def db_id(self) -> Optional[int]:
+    def db_id(self) -> int | None:
         return self._db_id
 
     @db_id.setter
@@ -47,7 +48,17 @@ class SortableBase(Base, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def _unique_id(self) -> str:
         """Returns an identification string that can be used to uniquely
-        identify this instance from others attached to the same experiment.
+        identify this instance from others attached to the same parent
+        object. For example, for ``Trials`` this can be their index,
+
+        since that is unique w.r.t. to parent ``Experiment`` object.
+        For ``GenerationNode``-s attached to a ``GenerationStrategy``,
+        this can be their name since we ensure uniqueness of it upon
+        ``GenerationStrategy`` instantiation.
+
+        This method is needed to correctly update SQLAlchemy objects
+        that appear as children of other objects, in lists or other
+        sortable collections or containers.
         """
         pass
 

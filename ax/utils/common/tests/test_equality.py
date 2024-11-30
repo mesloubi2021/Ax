@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from datetime import datetime
 
 import numpy as np
@@ -12,6 +14,7 @@ from ax.utils.common.equality import (
     dataframe_equals,
     datetime_equals,
     equality_typechecker,
+    is_ax_equal,
     object_attribute_dicts_find_unequal_fields,
     same_elements,
 )
@@ -32,7 +35,14 @@ class EqualityTest(TestCase):
     def test_ListsEquals(self) -> None:
         self.assertFalse(same_elements([0], [0, 1]))
         self.assertFalse(same_elements([1, 0], [0, 2]))
+        self.assertFalse(same_elements([1, 1], [1, 2]))
+        self.assertFalse(same_elements([1, 2], [1, 1]))
+        self.assertFalse(same_elements([1, 1, 2], [1, 2, 2]))
         self.assertTrue(same_elements([1, 0], [0, 1]))
+
+    def test_ListsEquals_floats(self) -> None:
+        self.assertTrue(same_elements([0.0], [0.000000000000001]))
+        self.assertTrue(same_elements([float("nan")], [float("nan")]))
 
     def test_DatetimeEquals(self) -> None:
         now = datetime.now()
@@ -72,3 +82,8 @@ class EqualityTest(TestCase):
         self.assertEqual(
             object_attribute_dicts_find_unequal_fields(np_0, np_1), ({}, {})
         )
+
+    def test_is_ax_equal_with_different_types(self) -> None:
+        self.assertTrue(is_ax_equal(1, 1.0))
+        self.assertTrue(is_ax_equal(1, np.ones(1)))
+        self.assertFalse(is_ax_equal(1, np.ones(5)))

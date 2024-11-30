@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Union
-
 from ax.core.parameter import ChoiceParameter, FixedParameter, Parameter, RangeParameter
 from ax.core.types import ComparisonOp
 from ax.utils.common.base import SortableBase
@@ -21,14 +19,13 @@ class ParameterConstraint(SortableBase):
     Constraints are expressed using a map from parameter name to weight
     followed by a bound.
 
-    The constraint is satisfied if w * v <= b where:
+    The constraint is satisfied if sum_i(w_i * v_i) <= b where:
         w is the vector of parameter weights.
         v is a vector of parameter values.
         b is the specified bound.
-        * is the dot product operator.
     """
 
-    def __init__(self, constraint_dict: Dict[str, float], bound: float) -> None:
+    def __init__(self, constraint_dict: dict[str, float], bound: float) -> None:
         """Initialize ParameterConstraint
 
         Args:
@@ -39,7 +36,7 @@ class ParameterConstraint(SortableBase):
         self._bound = bound
 
     @property
-    def constraint_dict(self) -> Dict[str, float]:
+    def constraint_dict(self) -> dict[str, float]:
         """Get mapping from parameter names to weights."""
         return self._constraint_dict
 
@@ -53,7 +50,7 @@ class ParameterConstraint(SortableBase):
         """Set bound."""
         self._bound = bound
 
-    def check(self, parameter_dict: Dict[str, Union[int, float]]) -> bool:
+    def check(self, parameter_dict: dict[str, int | float]) -> bool:
         """Whether or not the set of parameter values satisfies the constraint.
 
         Does a weighted sum of the parameter values based on the constraint_dict
@@ -84,7 +81,7 @@ class ParameterConstraint(SortableBase):
         )
 
     def clone_with_transformed_parameters(
-        self, transformed_parameters: Dict[str, Parameter]
+        self, transformed_parameters: dict[str, Parameter]
     ) -> ParameterConstraint:
         """Clone, but replaced parameters with transformed versions."""
         return self.clone()
@@ -92,10 +89,8 @@ class ParameterConstraint(SortableBase):
     def __repr__(self) -> str:
         return (
             "ParameterConstraint("
-            + " + ".join(
-                "{}*{}".format(v, k) for k, v in sorted(self.constraint_dict.items())
-            )
-            + " <= {})".format(self._bound)
+            + " + ".join(f"{v}*{k}" for k, v in sorted(self.constraint_dict.items()))
+            + f" <= {self._bound})"
         )
 
     @property
@@ -136,12 +131,12 @@ class OrderConstraint(ParameterConstraint):
         return self._upper_parameter
 
     @property
-    def parameters(self) -> List[Parameter]:
+    def parameters(self) -> list[Parameter]:
         """Parameters."""
         return [self.lower_parameter, self.upper_parameter]
 
     @property
-    def constraint_dict(self) -> Dict[str, float]:
+    def constraint_dict(self) -> dict[str, float]:
         """Weights on parameters for linear constraint representation."""
         return {self.lower_parameter.name: 1.0, self.upper_parameter.name: -1.0}
 
@@ -153,7 +148,7 @@ class OrderConstraint(ParameterConstraint):
         )
 
     def clone_with_transformed_parameters(
-        self, transformed_parameters: Dict[str, Parameter]
+        self, transformed_parameters: dict[str, Parameter]
     ) -> OrderConstraint:
         """Clone, but replace parameters with transformed versions."""
         return OrderConstraint(
@@ -171,7 +166,7 @@ class SumConstraint(ParameterConstraint):
     """Constraint on the sum of parameters being greater or less than a bound."""
 
     def __init__(
-        self, parameters: List[Parameter], is_upper_bound: bool, bound: float
+        self, parameters: list[Parameter], is_upper_bound: bool, bound: float
     ) -> None:
         """Initialize SumConstraint
 
@@ -184,19 +179,19 @@ class SumConstraint(ParameterConstraint):
 
         self._parameters = parameters
         self._is_upper_bound: bool = is_upper_bound
-        self._parameter_names: List[str] = [parameter.name for parameter in parameters]
+        self._parameter_names: list[str] = [parameter.name for parameter in parameters]
         self._bound: float = self._inequality_weight * bound
-        self._constraint_dict: Dict[str, float] = {
+        self._constraint_dict: dict[str, float] = {
             name: self._inequality_weight for name in self._parameter_names
         }
 
     @property
-    def parameters(self) -> List[Parameter]:
+    def parameters(self) -> list[Parameter]:
         """Parameters."""
         return self._parameters
 
     @property
-    def constraint_dict(self) -> Dict[str, float]:
+    def constraint_dict(self) -> dict[str, float]:
         """Weights on parameters for linear constraint representation."""
         return self._constraint_dict
 
@@ -223,7 +218,7 @@ class SumConstraint(ParameterConstraint):
         )
 
     def clone_with_transformed_parameters(
-        self, transformed_parameters: Dict[str, Parameter]
+        self, transformed_parameters: dict[str, Parameter]
     ) -> SumConstraint:
         """Clone, but replace parameters with transformed versions."""
         return SumConstraint(
@@ -253,7 +248,7 @@ class SumConstraint(ParameterConstraint):
         )
 
 
-def validate_constraint_parameters(parameters: List[Parameter]) -> None:
+def validate_constraint_parameters(parameters: list[Parameter]) -> None:
     """Basic validation of parameters used in a constraint.
 
     Args:

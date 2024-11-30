@@ -4,6 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+import math
 from copy import deepcopy
 from unittest import mock
 from unittest.mock import Mock
@@ -15,11 +18,11 @@ from ax.models.torch.botorch_defaults import (
     _get_model,
     get_and_fit_model,
     get_warping_transform,
-    NO_FEASIBLE_POINTS_MESSAGE,
+    NO_OBSERVED_POINTS_MESSAGE,
 )
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast, not_none
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.common.typeutils import checked_cast
+from ax.utils.testing.mock import mock_botorch_optimize
 from botorch.acquisition.logei import (
     qLogExpectedImprovement,
     qLogNoisyExpectedImprovement,
@@ -31,7 +34,8 @@ from botorch.acquisition.monte_carlo import (
     qSimpleRegret,
 )
 from botorch.acquisition.objective import ConstrainedMCObjective
-from botorch.acquisition.penalized import PenalizedMCObjective
+from botorch.acquisition.penalized import L1PenaltyObjective, PenalizedMCObjective
+from botorch.exceptions.errors import UnsupportedError
 from botorch.models.gp_regression import SingleTaskGP
 from botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP
 from botorch.models.multitask import MultiTaskGP
@@ -46,6 +50,7 @@ from gpytorch.module import Module
 from gpytorch.priors import GammaPrior
 from gpytorch.priors.lkj_prior import LKJCovariancePrior
 from gpytorch.priors.prior import Prior
+from pyre_extensions import none_throws
 
 
 class BotorchDefaultsTest(TestCase):
@@ -63,9 +68,14 @@ class BotorchDefaultsTest(TestCase):
         self.assertIsInstance(model, SingleTaskGP)
         self.assertIsInstance(model.likelihood, FixedNoiseGaussianLikelihood)
         self.assertEqual(
-            model.covar_module.base_kernel.lengthscale_prior.concentration, 3.0
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `lengthscale_prior`.
+            model.covar_module.lengthscale_prior.loc,
+            math.log(2.0) / 2 + 2**0.5,
         )
-        self.assertEqual(model.covar_module.base_kernel.lengthscale_prior.rate, 6.0)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `lengthscale_prior`.
+        self.assertEqual(model.covar_module.lengthscale_prior.scale, 3**0.5)
         model = _get_model(X=x, Y=y, Yvar=unknown_var, task_feature=1)
         self.assertIs(type(model), MultiTaskGP)  # Don't accept subclasses.
         self.assertIsInstance(model.likelihood, GaussianLikelihood)
@@ -96,15 +106,25 @@ class BotorchDefaultsTest(TestCase):
         #  Union[Type[LKJCovariancePrior], float, GammaPrior]]`.
         model = _get_model(X=x, Y=y, Yvar=partial_var.clone(), task_feature=1, **kwargs)
         self.assertIsInstance(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
             model.task_covar_module.IndexKernelPrior,
             LKJCovariancePrior,
         )
         self.assertEqual(
-            model.task_covar_module.IndexKernelPrior.sd_prior.concentration, 2.0
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
+            model.task_covar_module.IndexKernelPrior.sd_prior.concentration,
+            2.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `IndexKernelPrior`.
         self.assertEqual(model.task_covar_module.IndexKernelPrior.sd_prior.rate, 0.44)
         self.assertEqual(
-            model.task_covar_module.IndexKernelPrior.correlation_prior.eta, 0.6
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
+            model.task_covar_module.IndexKernelPrior.correlation_prior.eta,
+            0.6,
         )
 
         kwargs2 = {"prior": {"type": LKJCovariancePrior}}
@@ -120,15 +140,23 @@ class BotorchDefaultsTest(TestCase):
             **kwargs2,
         )
         self.assertIsInstance(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
             model.task_covar_module.IndexKernelPrior,
             LKJCovariancePrior,
         )
         self.assertEqual(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
             model.task_covar_module.IndexKernelPrior.sd_prior.concentration,
             1.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `IndexKernelPrior`.
         self.assertEqual(model.task_covar_module.IndexKernelPrior.sd_prior.rate, 0.15)
         self.assertEqual(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
             model.task_covar_module.IndexKernelPrior.correlation_prior.eta,
             0.5,
         )
@@ -165,8 +193,13 @@ class BotorchDefaultsTest(TestCase):
         model = _get_model(X=x, Y=y, Yvar=var, **deepcopy(kwargs6))  # pyre-ignore
         self.assertIsInstance(model, SingleTaskGP)
         self.assertEqual(
-            model.covar_module.base_kernel.lengthscale_prior.concentration, 12.0
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `base_kernel`.
+            model.covar_module.base_kernel.lengthscale_prior.concentration,
+            12.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `base_kernel`.
         self.assertEqual(model.covar_module.base_kernel.lengthscale_prior.rate, 2.0)
         model = _get_model(
             X=x,
@@ -178,24 +211,43 @@ class BotorchDefaultsTest(TestCase):
         self.assertIs(type(model), MultiTaskGP)
         self.assertIsInstance(model.likelihood, GaussianLikelihood)
         self.assertEqual(
-            model.covar_module.base_kernel.lengthscale_prior.concentration, 12.0
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `base_kernel`.
+            model.covar_module.base_kernel.lengthscale_prior.concentration,
+            12.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `base_kernel`.
         self.assertEqual(model.covar_module.base_kernel.lengthscale_prior.rate, 2.0)
         self.assertIsInstance(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
             model.task_covar_module.IndexKernelPrior,
             LKJCovariancePrior,
         )
         model = _get_model(
-            X=x, Y=y, Yvar=var, task_feature=1, **deepcopy(kwargs6)  # pyre-ignore
+            X=x,
+            Y=y,
+            Yvar=var,
+            task_feature=1,
+            **deepcopy(kwargs6),  # pyre-ignore
         )
         self.assertIsInstance(model, MultiTaskGP)
         self.assertIsInstance(model.likelihood, FixedNoiseGaussianLikelihood)
         self.assertEqual(
-            model.covar_module.base_kernel.lengthscale_prior.concentration, 12.0
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `base_kernel`.
+            model.covar_module.base_kernel.lengthscale_prior.concentration,
+            12.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `base_kernel`.
         self.assertEqual(model.covar_module.base_kernel.lengthscale_prior.rate, 2.0)
         self.assertIsInstance(
-            model.task_covar_module.IndexKernelPrior, LKJCovariancePrior
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `IndexKernelPrior`.
+            model.task_covar_module.IndexKernelPrior,
+            LKJCovariancePrior,
         )
         # test passing customized prior
         kwargs7 = {
@@ -209,14 +261,27 @@ class BotorchDefaultsTest(TestCase):
             lengthscale_prior=GammaPrior(6.0, 6.0),
         )
         model = _get_model(
-            X=x, Y=y, Yvar=var, covar_module=covar_module, **kwargs7  # pyre-ignore
+            X=x,
+            Y=y,
+            Yvar=var,
+            covar_module=covar_module,
+            **kwargs7,  # pyre-ignore
         )
         self.assertIsInstance(model, SingleTaskGP)
         self.assertIsInstance(model.likelihood, FixedNoiseGaussianLikelihood)
         self.assertEqual(covar_module, model.covar_module)
 
+        # test input warping dimension checks.
+        with self.assertRaisesRegex(UnsupportedError, "batched multi output models"):
+            _get_model(
+                X=torch.ones(4, 3, 2),
+                Y=torch.ones(4, 3, 2),
+                Yvar=torch.zeros(4, 3, 2),
+                use_input_warping=True,
+            )
+
     @mock.patch("ax.models.torch.botorch_defaults._get_model", wraps=_get_model)
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     # pyre-fixme[3]: Return type must be annotated.
     # pyre-fixme[2]: Parameter must be annotated.
     def test_task_feature(self, get_model_mock):
@@ -276,7 +341,7 @@ class BotorchDefaultsTest(TestCase):
             )
 
     @mock.patch("ax.models.torch.botorch_defaults._get_model", wraps=_get_model)
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_pass_customized_prior(self, get_model_mock: Mock) -> None:
         x = [torch.zeros(2, 2)]
         y = [torch.zeros(2, 1)]
@@ -304,11 +369,19 @@ class BotorchDefaultsTest(TestCase):
         self.assertIsInstance(model.likelihood, FixedNoiseGaussianLikelihood)
 
         self.assertEqual(
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `base_kernel`.
             model.covar_module.base_kernel.lengthscale_prior.concentration,
             12.0,
         )
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `base_kernel`.
         self.assertEqual(model.covar_module.base_kernel.lengthscale_prior.rate, 2.0)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `outputscale_prior`.
         self.assertEqual(model.covar_module.outputscale_prior.concentration, 2.0)
+        # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+        #  `outputscale_prior`.
         self.assertEqual(model.covar_module.outputscale_prior.rate, 12.0)
 
         model = get_and_fit_model(
@@ -322,6 +395,8 @@ class BotorchDefaultsTest(TestCase):
             refit_model=False,
             **kwarg,  # pyre-ignore
         )
+        # pyre-fixme[29]: `Union[(self: Tensor) -> Any, Tensor, Module]` is not a
+        #  function.
         for m in model.models:
             self.assertIs(type(m), MultiTaskGP)
             self.assertIsInstance(m.likelihood, FixedNoiseGaussianLikelihood)
@@ -346,10 +421,11 @@ class BotorchDefaultsTest(TestCase):
             torch.tensor([[1.0], [-1.0], [0.0]]),  # k x 1
         )
         X_observed = torch.zeros(2, d)
-        expected_constraints = not_none(
+        expected_constraints = none_throws(
             get_outcome_constraint_transforms(outcome_constraints)
         )
         samples = torch.zeros(n, m)  # to test constraints
+
         for acqf_name, acqf_class in zip(
             ["qEI", "qLogEI", "qPI", "qNEI", "qLogNEI"],
             [
@@ -374,10 +450,12 @@ class BotorchDefaultsTest(TestCase):
             self.assertIsNotNone(acqf_constraints)
 
             # while the function pointer is different, return value has to be the same
+            # pyre-fixme[6]: For 1st argument expected `Iterable[_T1]` but got
+            #  `Union[Tensor, Module]`.
             for acqf_con, exp_con in zip(acqf_constraints, expected_constraints):
                 self.assertTrue(torch.allclose(acqf_con(samples), exp_con(samples)))
 
-            with self.assertRaisesRegex(ValueError, NO_FEASIBLE_POINTS_MESSAGE):
+            with self.assertRaisesRegex(ValueError, NO_OBSERVED_POINTS_MESSAGE):
                 _get_acquisition_func(
                     model=model,
                     acquisition_function_name=acqf_name,
@@ -385,6 +463,41 @@ class BotorchDefaultsTest(TestCase):
                     outcome_constraints=outcome_constraints,
                     X_observed=None,  # errors because of no observations
                 )
+
+        # test support for PenalizedMCObjective
+        penalty_objective = L1PenaltyObjective(init_point=torch.zeros(1, d))
+        for acqf_name, acqf_class in zip(
+            ["qEI", "qLogEI", "qNEI", "qLogNEI"],
+            [
+                qExpectedImprovement,
+                qLogExpectedImprovement,
+                qNoisyExpectedImprovement,
+                qLogNoisyExpectedImprovement,
+            ],
+        ):
+            acqf = _get_acquisition_func(
+                model=model,
+                acquisition_function_name=acqf_name,
+                objective_weights=objective_weights,
+                outcome_constraints=outcome_constraints,
+                X_observed=X_observed,
+                mc_objective=PenalizedMCObjective,
+                constrained_mc_objective=None,
+                mc_objective_kwargs={
+                    "penalty_objective": penalty_objective,
+                    "regularization_parameter": 0.1,
+                },
+            )
+            self.assertIsInstance(acqf, acqf_class)
+            acqf_constraints = acqf._constraints
+            self.assertIsNotNone(acqf_constraints)
+            self.assertIsInstance(acqf.objective, PenalizedMCObjective)
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `penalty_objective`.
+            self.assertIsInstance(acqf.objective.penalty_objective, L1PenaltyObjective)
+            # pyre-fixme[16]: Item `Tensor` of `Tensor | Module` has no attribute
+            #  `regularization_parameter`.
+            self.assertEqual(acqf.objective.regularization_parameter, 0.1)
 
         acqf_name = "qSR"
         acqf_class = qSimpleRegret
@@ -418,19 +531,6 @@ class BotorchDefaultsTest(TestCase):
                 constrained_mc_objective=None,
             )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Outcome constraints are not supported for PenalizedMCObjective",
-        ):
-            _get_acquisition_func(
-                model=model,
-                acquisition_function_name=acqf_name,
-                objective_weights=objective_weights,
-                mc_objective=PenalizedMCObjective,
-                outcome_constraints=outcome_constraints,
-                X_observed=X_observed,
-            )
-
         # these are not yet supported, will require passing additional arguments to
         # the botorch constructor (i.e. beta for UCB, ref_point and Yfor EHVI.)
         for acqf_name in ["qUCB", "qEHVI", "qNEHVI"]:
@@ -449,7 +549,7 @@ class BotorchDefaultsTest(TestCase):
         covar_module = _get_customized_covar_module(
             covar_module_prior_dict={},
             ard_num_dims=ard_num_dims,
-            batch_shape=batch_shape,
+            aug_batch_shape=batch_shape,
             task_feature=None,
         )
         self.assertIsInstance(covar_module, Module)
@@ -476,7 +576,7 @@ class BotorchDefaultsTest(TestCase):
                 "outputscale_prior": GammaPrior(2.0, 12.0),
             },
             ard_num_dims=ard_num_dims,
-            batch_shape=batch_shape,
+            aug_batch_shape=batch_shape,
             task_feature=3,
         )
         self.assertIsInstance(covar_module, Module)

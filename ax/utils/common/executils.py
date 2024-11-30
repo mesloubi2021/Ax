@@ -4,30 +4,36 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import asyncio
 import functools
+import threading
 import time
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from functools import partial
 from logging import Logger
-from typing import Any, Generator, List, Optional, Tuple, Type
+from typing import Any, TypeVar
 
 
 MAX_WAIT_SECONDS: int = 600
+T = TypeVar("T")
 
 
 # pyre-fixme[3]: Return annotation cannot be `Any`.
 def retry_on_exception(
-    exception_types: Optional[Tuple[Type[Exception], ...]] = None,
-    no_retry_on_exception_types: Optional[Tuple[Type[Exception], ...]] = None,
-    check_message_contains: Optional[List[str]] = None,
+    exception_types: tuple[type[Exception], ...] | None = None,
+    no_retry_on_exception_types: tuple[type[Exception], ...] | None = None,
+    check_message_contains: list[str] | None = None,
     retries: int = 3,
     suppress_all_errors: bool = False,
-    logger: Optional[Logger] = None,
+    logger: Logger | None = None,
     # pyre-fixme[2]: Parameter annotation cannot be `Any`.
-    default_return_on_suppression: Optional[Any] = None,
-    wrap_error_message_in: Optional[str] = None,
-    initial_wait_seconds: Optional[int] = None,
-) -> Optional[Any]:
+    default_return_on_suppression: Any | None = None,
+    wrap_error_message_in: str | None = None,
+    initial_wait_seconds: int | None = None,
+) -> Any | None:
     """
     A decorator for instance methods or standalone functions that makes them
     retry on failure and allows to specify on which types of exceptions the
@@ -117,6 +123,8 @@ def retry_on_exception(
                             wait_interval = min(
                                 MAX_WAIT_SECONDS, initial_wait_seconds * 2 ** (i - 1)
                             )
+                            # pyre-fixme[1001]: `asyncio.sleep(wait_interval)` is
+                            #  never awaited.
                             asyncio.sleep(wait_interval)
                         return await func(*args, **kwargs)
                 # If we are here, it means the retries were finished but
@@ -171,13 +179,13 @@ def retry_on_exception(
 
 @contextmanager
 def handle_exceptions_in_retries(
-    no_retry_exceptions: Tuple[Type[Exception], ...],
-    retry_exceptions: Tuple[Type[Exception], ...],
+    no_retry_exceptions: tuple[type[Exception], ...],
+    retry_exceptions: tuple[type[Exception], ...],
     suppress_errors: bool,
-    check_message_contains: Optional[str],
+    check_message_contains: str | None,
     last_retry: bool,
-    logger: Optional[Logger],
-    wrap_error_message_in: Optional[str],
+    logger: Logger | None,
+    wrap_error_message_in: str | None,
 ) -> Generator[None, None, None]:
     try:
         yield  # Perform action within the context manager.
@@ -212,11 +220,11 @@ def handle_exceptions_in_retries(
 
 
 def _validate_and_fill_defaults(
-    retry_on_exception_types: Optional[Tuple[Type[Exception], ...]],
-    no_retry_on_exception_types: Optional[Tuple[Type[Exception], ...]],
+    retry_on_exception_types: tuple[type[Exception], ...] | None,
+    no_retry_on_exception_types: tuple[type[Exception], ...] | None,
     suppress_errors: bool,
     **kwargs: Any,
-) -> Tuple[Tuple[Type[Exception], ...], Tuple[Type[Exception], ...], bool]:
+) -> tuple[tuple[type[Exception], ...], tuple[type[Exception], ...], bool]:
     if retry_on_exception_types is None:
         # If no exception type provided, we catch all errors.
         retry_on_exception_types = (Exception,)
@@ -236,3 +244,40 @@ def _validate_and_fill_defaults(
     # when used on instance methods.
     suppress_errors = suppress_errors or kwargs.get("suppress_all_errors", False)
     return retry_on_exception_types, no_retry_on_exception_types or (), suppress_errors
+
+
+def execute_with_timeout(partial_func: Callable[..., T], timeout: float) -> T:
+    """Execute a function in a thread that we can abandon if it takes too long.
+    The thread cannot actually be terminated, so the process will keep executing
+    after timeout, but not on the main thread.
+
+    Args:
+        partial_func: A partial function to execute.  This should either be a
+            function that takes no arguments, or a functools.partial function
+            with all arguments bound.
+        timeout: The timeout in seconds.
+
+    Returns:
+        The return value of the partial function when called.
+    """
+    # since threads cannot return values or raise exceptions in the main thread,
+    # we pass it a context dict and have it update it with the return value or
+    # exception.
+    context_dict = {}
+
+    def execute_partial_with_context(context: dict[str, Any]) -> None:
+        try:
+            context["return_value"] = partial_func()
+        except Exception as e:
+            context["exception"] = e
+
+    thread = threading.Thread(
+        target=partial(execute_partial_with_context, context_dict)
+    )
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError("Function timed out")
+    if "exception" in context_dict:
+        raise context_dict["exception"]
+    return context_dict["return_value"]

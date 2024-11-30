@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections.abc import Iterable
 from logging import Logger
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -14,7 +16,7 @@ from ax.early_stopping.strategies.base import BaseEarlyStoppingStrategy
 from ax.early_stopping.utils import align_partial_results
 from ax.exceptions.core import UnsupportedError
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -25,14 +27,13 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
 
     def __init__(
         self,
-        metric_names: Optional[Iterable[str]] = None,
+        metric_names: Iterable[str] | None = None,
         seconds_between_polls: int = 300,
         percentile_threshold: float = 50.0,
-        min_progression: Optional[float] = 10,
-        max_progression: Optional[float] = None,
-        min_curves: Optional[int] = 5,
-        trial_indices_to_ignore: Optional[List[int]] = None,
-        true_objective_metric_name: Optional[str] = None,
+        min_progression: float | None = 10,
+        max_progression: float | None = None,
+        min_curves: int | None = 5,
+        trial_indices_to_ignore: list[int] | None = None,
         normalize_progressions: bool = False,
     ) -> None:
         """Construct a PercentileEarlyStoppingStrategy instance.
@@ -60,9 +61,6 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
                 `min_curves` trials are completed but their curve data was not
                 successfully retrieved, further trials may not be early-stopped.
             trial_indices_to_ignore: Trial indices that should not be early stopped.
-            true_objective_metric_name: The actual objective to be optimized; used in
-                situations where early stopping uses a proxy objective (such as training
-                loss instead of eval loss) for stopping decisions.
             normalize_progressions: Normalizes the progression column of the MapData df
                 by dividing by the max. If the values were originally in [0, `prog_max`]
                 (as we would expect), the transformed values will be in [0, 1]. Useful
@@ -78,7 +76,6 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
             min_progression=min_progression,
             max_progression=max_progression,
             min_curves=min_curves,
-            true_objective_metric_name=true_objective_metric_name,
             normalize_progressions=normalize_progressions,
         )
 
@@ -93,10 +90,9 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
 
     def should_stop_trials_early(
         self,
-        trial_indices: Set[int],
+        trial_indices: set[int],
         experiment: Experiment,
-        **kwargs: Dict[str, Any],
-    ) -> Dict[int, Optional[str]]:
+    ) -> dict[int, str | None]:
         """Stop a trial if its performance is in the bottom `percentile_threshold`
         of the trials at the same step.
 
@@ -144,7 +140,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
 
         aligned_means = metric_to_aligned_means[metric_name]
         decisions = {
-            trial_index: self.should_stop_trial_early(
+            trial_index: self._should_stop_trial_early(
                 trial_index=trial_index,
                 experiment=experiment,
                 df=aligned_means,
@@ -160,7 +156,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
             if should_stop
         }
 
-    def should_stop_trial_early(
+    def _should_stop_trial_early(
         self,
         trial_index: int,
         experiment: Experiment,
@@ -168,7 +164,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         df_raw: pd.DataFrame,
         map_key: str,
         minimize: bool,
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """Stop a trial if its performance is in the bottom `percentile_threshold`
         of the trials at the same step.
 
@@ -197,7 +193,7 @@ class PercentileEarlyStoppingStrategy(BaseEarlyStoppingStrategy):
         # dropna() here will exclude trials that have not made it to the
         # last progression of the trial under consideration, and therefore
         # can't be included in the comparison
-        df_trial = not_none(df[trial_index].dropna())
+        df_trial = none_throws(df[trial_index].dropna())
         trial_last_prog = df_trial.index.max()
         data_at_last_progression = df.loc[trial_last_prog].dropna()
         logger.info(

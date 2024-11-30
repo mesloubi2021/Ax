@@ -4,10 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 from ax.core.metric import Metric
@@ -76,16 +80,17 @@ class TorchOptConfig:
     """
 
     objective_weights: Tensor
-    outcome_constraints: Optional[Tuple[Tensor, Tensor]] = None
-    objective_thresholds: Optional[Tensor] = None
-    linear_constraints: Optional[Tuple[Tensor, Tensor]] = None
-    fixed_features: Optional[Dict[int, float]] = None
-    pending_observations: Optional[List[Tensor]] = None
+    outcome_constraints: tuple[Tensor, Tensor] | None = None
+    objective_thresholds: Tensor | None = None
+    linear_constraints: tuple[Tensor, Tensor] | None = None
+    fixed_features: dict[int, float] | None = None
+    pending_observations: list[Tensor] | None = None
     model_gen_options: TConfig = field(default_factory=dict)
-    rounding_func: Optional[Callable[[Tensor], Tensor]] = None
-    opt_config_metrics: Optional[Dict[str, Metric]] = None
+    rounding_func: Callable[[Tensor], Tensor] | None = None
+    opt_config_metrics: dict[str, Metric] = field(default_factory=dict)
     is_moo: bool = False
-    risk_measure: Optional[RiskMeasureMCObjective] = None
+    risk_measure: RiskMeasureMCObjective | None = None
+    fit_out_of_design: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,8 +106,8 @@ class TorchGenResults:
 
     points: Tensor  # (n x d)-dim
     weights: Tensor  # n-dim
-    gen_metadata: Dict[str, Any] = field(default_factory=dict)
-    candidate_metadata: Optional[List[TCandidateMetadata]] = None
+    gen_metadata: dict[str, Any] = field(default_factory=dict)
+    candidate_metadata: list[TCandidateMetadata] | None = None
 
 
 class TorchModel(BaseModel):
@@ -112,24 +117,21 @@ class TorchModel(BaseModel):
     of Ax.
     """
 
-    dtype: Optional[torch.dtype] = None
-    device: Optional[torch.device] = None
+    dtype: torch.dtype | None = None
+    device: torch.device | None = None
     _supports_robust_optimization: bool = False
 
     def fit(
         self,
-        datasets: List[SupervisedDataset],
-        metric_names: List[str],
+        datasets: list[SupervisedDataset],
         search_space_digest: SearchSpaceDigest,
-        candidate_metadata: Optional[List[List[TCandidateMetadata]]] = None,
+        candidate_metadata: list[list[TCandidateMetadata]] | None = None,
     ) -> None:
         """Fit model to m outcomes.
 
         Args:
             datasets: A list of ``SupervisedDataset`` containers, each
                 corresponding to the data of one metric (outcome).
-            metric_names: A list of metric names, with the i-th metric
-                corresponding to the i-th dataset.
             search_space_digest: A ``SearchSpaceDigest`` object containing
                 metadata on the features in the datasets.
             candidate_metadata: Model-produced metadata for candidates, in
@@ -137,7 +139,7 @@ class TorchModel(BaseModel):
         """
         pass
 
-    def predict(self, X: Tensor) -> Tuple[Tensor, Tensor]:
+    def predict(self, X: Tensor) -> tuple[Tensor, Tensor]:
         """Predict
 
         Args:
@@ -177,7 +179,7 @@ class TorchModel(BaseModel):
         self,
         search_space_digest: SearchSpaceDigest,
         torch_opt_config: TorchOptConfig,
-    ) -> Optional[Tensor]:
+    ) -> Tensor | None:
         """
         Identify the current best point, satisfying the constraints in the same
         format as to gen.
@@ -197,11 +199,11 @@ class TorchModel(BaseModel):
 
     def cross_validate(
         self,
-        datasets: List[SupervisedDataset],
-        metric_names: List[str],
+        datasets: list[SupervisedDataset],
         X_test: Tensor,
         search_space_digest: SearchSpaceDigest,
-    ) -> Tuple[Tensor, Tensor]:
+        use_posterior_predictive: bool = False,
+    ) -> tuple[Tensor, Tensor]:
         """Do cross validation with the given training and test sets.
 
         Training set is given in the same format as to fit. Test set is given
@@ -210,11 +212,12 @@ class TorchModel(BaseModel):
         Args:
             datasets: A list of ``SupervisedDataset`` containers, each
                 corresponding to the data of one metric (outcome).
-            metric_names: A list of metric names, with the i-th metric
-                corresponding to the i-th dataset.
             X_test: (j x d) tensor of the j points at which to make predictions.
             search_space_digest: A SearchSpaceDigest object containing
                 metadata on the features in X.
+            use_posterior_predictive: A boolean indicating if the predictions
+                should be from the posterior predictive (i.e. including
+                observation noise).
 
         Returns:
             2-element tuple containing
@@ -227,10 +230,10 @@ class TorchModel(BaseModel):
 
     def update(
         self,
-        datasets: List[Optional[SupervisedDataset]],
-        metric_names: List[str],
+        datasets: list[SupervisedDataset],
+        metric_names: list[str],
         search_space_digest: SearchSpaceDigest,
-        candidate_metadata: Optional[List[List[TCandidateMetadata]]] = None,
+        candidate_metadata: list[list[TCandidateMetadata]] | None = None,
     ) -> None:
         """Update the model.
 
@@ -256,7 +259,7 @@ class TorchModel(BaseModel):
         X: Tensor,
         search_space_digest: SearchSpaceDigest,
         torch_opt_config: TorchOptConfig,
-        acq_options: Optional[Dict[str, Any]] = None,
+        acq_options: dict[str, Any] | None = None,
     ) -> Tensor:
         """Evaluate the acquisition function on the candidate set `X`.
 

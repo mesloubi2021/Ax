@@ -4,9 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import logging
 import warnings
-from typing import Any, Dict
+from typing import Any
 
 import torch
 from ax.core.objective import MultiObjective
@@ -23,7 +25,6 @@ from ax.modelbridge.transforms.log_y import LogY
 from ax.modelbridge.transforms.winsorize import Winsorize
 from ax.models.winsorization_config import WinsorizationConfig
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import not_none
 from ax.utils.testing.core_stubs import (
     get_branin_search_space,
     get_discrete_search_space,
@@ -34,13 +35,14 @@ from ax.utils.testing.core_stubs import (
     get_search_space_with_choice_parameters,
     run_branin_experiment_with_generation_strategy,
 )
-from ax.utils.testing.mock import fast_botorch_optimize
+from ax.utils.testing.mock import mock_botorch_optimize
+from pyre_extensions import none_throws
 
 
 class TestDispatchUtils(TestCase):
     """Tests that dispatching utilities correctly select generation strategies."""
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_choose_generation_strategy(self) -> None:
         expected_transforms = [Winsorize] + Cont_X_trans + Y_trans
         expected_transform_configs = {
@@ -54,10 +56,11 @@ class TestDispatchUtils(TestCase):
             self.assertEqual(sobol_gpei._steps[0].model, Models.SOBOL)
             self.assertEqual(sobol_gpei._steps[0].num_trials, 5)
             self.assertEqual(sobol_gpei._steps[1].model, Models.BOTORCH_MODULAR)
-            expected_model_kwargs: Dict[str, Any] = {
+            expected_model_kwargs: dict[str, Any] = {
                 "torch_device": None,
                 "transforms": expected_transforms,
                 "transform_configs": expected_transform_configs,
+                "fit_out_of_design": False,
             }
             self.assertEqual(sobol_gpei._steps[1].model_kwargs, expected_model_kwargs)
             device = torch.device("cpu")
@@ -78,6 +81,14 @@ class TestDispatchUtils(TestCase):
             )
             self.assertEqual(sobol_gpei._steps[0].model, Models.SOBOL)
             self.assertEqual(sobol_gpei._steps[0].num_trials, 2)
+            self.assertEqual(sobol_gpei._steps[1].model, Models.BOTORCH_MODULAR)
+        with self.subTest("min sobol trials"):
+            sobol_gpei = choose_generation_strategy(
+                search_space=get_branin_search_space(),
+                min_sobol_trials_observed=1,
+            )
+            self.assertEqual(sobol_gpei._steps[0].model, Models.SOBOL)
+            self.assertEqual(sobol_gpei._steps[0].min_trials_observed, 1)
             self.assertEqual(sobol_gpei._steps[1].model, Models.BOTORCH_MODULAR)
         with self.subTest("num_initialization_trials > max_initialization_trials"):
             sobol_gpei = choose_generation_strategy(
@@ -108,10 +119,15 @@ class TestDispatchUtils(TestCase):
             self.assertEqual(sobol_gpei._steps[0].model, Models.SOBOL)
             self.assertEqual(sobol_gpei._steps[0].num_trials, 5)
             self.assertEqual(sobol_gpei._steps[1].model, Models.BOTORCH_MODULAR)
-            model_kwargs = not_none(sobol_gpei._steps[1].model_kwargs)
+            model_kwargs = none_throws(sobol_gpei._steps[1].model_kwargs)
             self.assertEqual(
                 set(model_kwargs.keys()),
-                {"torch_device", "transforms", "transform_configs"},
+                {
+                    "torch_device",
+                    "transforms",
+                    "transform_configs",
+                    "fit_out_of_design",
+                },
             )
             self.assertGreater(len(model_kwargs["transforms"]), 0)
         with self.subTest("Sobol (we can try every option)"):
@@ -188,6 +204,7 @@ class TestDispatchUtils(TestCase):
                 "torch_device": None,
                 "transforms": [Winsorize] + Mixed_transforms + Y_trans,
                 "transform_configs": expected_transform_configs,
+                "fit_out_of_design": False,
             }
             self.assertEqual(bo_mixed._steps[1].model_kwargs, expected_model_kwargs)
         with self.subTest("BO_MIXED (mixed search space)"):
@@ -202,6 +219,7 @@ class TestDispatchUtils(TestCase):
                 "torch_device": None,
                 "transforms": [Winsorize] + Mixed_transforms + Y_trans,
                 "transform_configs": expected_transform_configs,
+                "fit_out_of_design": False,
             }
             self.assertEqual(bo_mixed._steps[1].model_kwargs, expected_model_kwargs)
         with self.subTest("BO_MIXED (mixed multi-objective optimization)"):
@@ -216,10 +234,15 @@ class TestDispatchUtils(TestCase):
             self.assertEqual(moo_mixed._steps[0].model, Models.SOBOL)
             self.assertEqual(moo_mixed._steps[0].num_trials, 5)
             self.assertEqual(moo_mixed._steps[1].model, Models.BO_MIXED)
-            model_kwargs = not_none(moo_mixed._steps[1].model_kwargs)
+            model_kwargs = none_throws(moo_mixed._steps[1].model_kwargs)
             self.assertEqual(
                 set(model_kwargs.keys()),
-                {"torch_device", "transforms", "transform_configs"},
+                {
+                    "torch_device",
+                    "transforms",
+                    "transform_configs",
+                    "fit_out_of_design",
+                },
             )
             self.assertGreater(len(model_kwargs["transforms"]), 0)
         with self.subTest("SAASBO"):
@@ -285,6 +308,16 @@ class TestDispatchUtils(TestCase):
             self.assertEqual(gs_6_init_trials._steps[0].model, Models.SOBOL)
             self.assertEqual(gs_6_init_trials._steps[0].num_trials, 6)
             self.assertEqual(gs_6_init_trials._steps[1].model, Models.BOTORCH_MODULAR)
+        with self.subTest("suggested_model_override"):
+            sobol_gpei = choose_generation_strategy(
+                search_space=get_branin_search_space()
+            )
+            self.assertEqual(sobol_gpei._steps[1].model, Models.BOTORCH_MODULAR)
+            sobol_saasbo = choose_generation_strategy(
+                search_space=get_branin_search_space(),
+                suggested_model_override=Models.SAASBO,
+            )
+            self.assertEqual(sobol_saasbo._steps[1].model, Models.SAASBO)
 
     def test_make_botorch_step_extra(self) -> None:
         # Test parts of _make_botorch_step that are not directly exposed in
@@ -295,10 +328,10 @@ class TestDispatchUtils(TestCase):
         }
         bo_step = _make_botorch_step(model_kwargs=model_kwargs)
         self.assertEqual(
-            not_none(bo_step.model_kwargs)["transforms"], [Winsorize, LogY]
+            none_throws(bo_step.model_kwargs)["transforms"], [Winsorize, LogY]
         )
         self.assertEqual(
-            not_none(bo_step.model_kwargs)["transform_configs"],
+            none_throws(bo_step.model_kwargs)["transform_configs"],
             {
                 "LogY": {"metrics": ["metric_1"]},
                 "Derelativize": {"use_raw_status_quo": False},
@@ -306,7 +339,7 @@ class TestDispatchUtils(TestCase):
             },
         )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_disable_progbar(self) -> None:
         for disable_progbar in (True, False):
             with self.subTest(str(disable_progbar)):
@@ -318,25 +351,25 @@ class TestDispatchUtils(TestCase):
                 self.assertEqual(sobol_saasbo._steps[0].model, Models.SOBOL)
                 self.assertNotIn(
                     "disable_progbar",
-                    not_none(sobol_saasbo._steps[0].model_kwargs),
+                    none_throws(sobol_saasbo._steps[0].model_kwargs),
                 )
                 self.assertEqual(sobol_saasbo._steps[1].model, Models.SAASBO)
                 self.assertNotIn(
                     "disable_progbar",
-                    not_none(sobol_saasbo._steps[0].model_kwargs),
+                    none_throws(sobol_saasbo._steps[0].model_kwargs),
                 )
                 # TODO[T164389105] Rewrite choose_generation_strategy to be MBM first
                 # Once this task is complete we should check disable_progbar gets
                 # propagated correctly (right now it is dropped). Ex.:
                 # self.assertEqual(
-                #     not_none(sobol_saasbo._steps[1].model_kwargs)["disable_progbar"],
+                #     none_throws(sobol_saasbo._steps[1].model_kwargs)["disable_progbar"],
                 #     disable_progbar,
                 # )
                 run_branin_experiment_with_generation_strategy(
                     generation_strategy=sobol_saasbo
                 )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_disable_progbar_for_non_saasbo_discards_the_model_kwarg(self) -> None:
         for disable_progbar in (True, False):
             with self.subTest(str(disable_progbar)):
@@ -349,12 +382,12 @@ class TestDispatchUtils(TestCase):
                 self.assertEqual(gp_saasbo._steps[0].model, Models.SOBOL)
                 self.assertNotIn(
                     "disable_progbar",
-                    not_none(gp_saasbo._steps[0].model_kwargs),
+                    none_throws(gp_saasbo._steps[0].model_kwargs),
                 )
                 self.assertEqual(gp_saasbo._steps[1].model, Models.BOTORCH_MODULAR)
                 self.assertNotIn(
                     "disable_progbar",
-                    not_none(gp_saasbo._steps[1].model_kwargs),
+                    none_throws(gp_saasbo._steps[1].model_kwargs),
                 )
                 run_branin_experiment_with_generation_strategy(
                     generation_strategy=gp_saasbo
@@ -366,7 +399,7 @@ class TestDispatchUtils(TestCase):
         )
         sobol.gen(experiment=get_experiment(), n=1)
         # First model is actually a bridge, second is the Sobol engine.
-        self.assertEqual(not_none(sobol.model).model.seed, 9)
+        self.assertEqual(none_throws(sobol.model).model.seed, 9)
 
         with self.subTest("warns if use_saasbo is true"):
             with self.assertLogs(
@@ -459,7 +492,7 @@ class TestDispatchUtils(TestCase):
             search_space=get_branin_search_space(),
             winsorization_config=WinsorizationConfig(upper_quantile_margin=2),
         )
-        tc = not_none(winsorized._steps[1].model_kwargs).get("transform_configs")
+        tc = none_throws(winsorized._steps[1].model_kwargs).get("transform_configs")
         self.assertIn("Winsorize", tc)
         self.assertDictEqual(
             tc["Winsorize"],
@@ -479,7 +512,7 @@ class TestDispatchUtils(TestCase):
             search_space=get_branin_search_space(),
             derelativize_with_raw_status_quo=True,
         )
-        tc = not_none(winsorized._steps[1].model_kwargs).get("transform_configs")
+        tc = none_throws(winsorized._steps[1].model_kwargs).get("transform_configs")
         self.assertIn(
             "Winsorize",
             tc,
@@ -506,7 +539,7 @@ class TestDispatchUtils(TestCase):
 
         self.assertNotIn(
             "Winsorize",
-            not_none(unwinsorized._steps[1].model_kwargs)["transform_configs"],
+            none_throws(unwinsorized._steps[1].model_kwargs)["transform_configs"],
         )
 
     def test_num_trials(self) -> None:
@@ -690,7 +723,7 @@ class TestDispatchUtils(TestCase):
                 5,
             )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_jit_compile(self) -> None:
         for jit_compile in (True, False):
             with self.subTest(str(jit_compile)):
@@ -702,25 +735,25 @@ class TestDispatchUtils(TestCase):
                 self.assertEqual(sobol_saasbo._steps[0].model, Models.SOBOL)
                 self.assertNotIn(
                     "jit_compile",
-                    not_none(sobol_saasbo._steps[0].model_kwargs),
+                    none_throws(sobol_saasbo._steps[0].model_kwargs),
                 )
                 self.assertEqual(sobol_saasbo._steps[1].model, Models.SAASBO)
                 self.assertNotIn(
                     "jit_compile",
-                    not_none(sobol_saasbo._steps[0].model_kwargs),
+                    none_throws(sobol_saasbo._steps[0].model_kwargs),
                 )
                 # TODO[T164389105] Rewrite choose_generation_strategy to be MBM first
                 # Once this task is complete we should check jit_compile gets
                 # propagated correctly (right now it is dropped). Ex.:
                 # self.assertEqual(
-                #     not_none(sobol_saasbo._steps[1].model_kwargs)["jit_compile"],
+                #     none_throws(sobol_saasbo._steps[1].model_kwargs)["jit_compile"],
                 #     jit_compile,
                 # )
                 run_branin_experiment_with_generation_strategy(
                     generation_strategy=sobol_saasbo,
                 )
 
-    @fast_botorch_optimize
+    @mock_botorch_optimize
     def test_jit_compile_for_non_saasbo_discards_the_model_kwarg(self) -> None:
         for jit_compile in (True, False):
             with self.subTest(str(jit_compile)):
@@ -733,12 +766,12 @@ class TestDispatchUtils(TestCase):
                 self.assertEqual(gp_saasbo._steps[0].model, Models.SOBOL)
                 self.assertNotIn(
                     "jit_compile",
-                    not_none(gp_saasbo._steps[0].model_kwargs),
+                    none_throws(gp_saasbo._steps[0].model_kwargs),
                 )
                 self.assertEqual(gp_saasbo._steps[1].model, Models.BOTORCH_MODULAR)
                 self.assertNotIn(
                     "jit_compile",
-                    not_none(gp_saasbo._steps[1].model_kwargs),
+                    none_throws(gp_saasbo._steps[1].model_kwargs),
                 )
                 run_branin_experiment_with_generation_strategy(
                     generation_strategy=gp_saasbo,

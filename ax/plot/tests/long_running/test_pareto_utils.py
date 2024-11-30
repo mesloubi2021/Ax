@@ -4,11 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.exceptions.core import UnsupportedError
 from ax.metrics.branin import BraninMetric
 from ax.modelbridge.registry import Models
 from ax.plot.pareto_utils import compute_posterior_pareto_frontier
-
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import get_branin_experiment
 
@@ -20,6 +21,7 @@ from ax.utils.testing.core_stubs import get_branin_experiment
 # run in streesRun mode).
 class ComputePosteriorParetoFrontierTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         experiment = get_branin_experiment()
         experiment.add_tracking_metric(
             BraninMetric(name="m2", param_names=["x1", "x2"])
@@ -29,6 +31,8 @@ class ComputePosteriorParetoFrontierTest(TestCase):
         experiment.new_batch_trial(generator_run=a).run()
         self.experiment = experiment
         self.metrics = list(experiment.metrics.values())
+        self.metrics[0].lower_is_better = True
+        self.metrics[1].lower_is_better = False
 
     def test_ComputePosteriorParetoFrontierByTrial(self) -> None:
         # Experiments with batch trials must specify trial_index or data

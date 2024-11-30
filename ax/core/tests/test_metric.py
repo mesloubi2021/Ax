@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.metric import Metric, MetricFetchE
 from ax.utils.common.result import Err
 from ax.utils.common.testutils import TestCase
@@ -13,6 +15,12 @@ from ax.utils.testing.core_stubs import (
     get_experiment,
     get_factorial_metric,
 )
+
+
+class TestMetric(Metric):
+    __test__ = False
+
+    pass
 
 
 METRIC_STRING = "Metric('m1')"
@@ -109,3 +117,24 @@ class MetricTest(TestCase):
             m.bulk_fetch_experiment_data(
                 experiment=exp_1, trials=list(exp_2.trials.values()), metrics=[m]
             )
+
+    def test_summary_dict(self) -> None:
+        metric = Metric(name="m1", lower_is_better=False)
+        self.assertDictEqual(
+            metric.summary_dict,
+            {
+                "name": "m1",
+                "type": "Metric",
+                "lower_is_better": False,
+            },
+        )
+
+        metric = TestMetric(name="m2", lower_is_better=True)
+        self.assertDictEqual(
+            metric.summary_dict,
+            {
+                "name": "m2",
+                "type": "TestMetric",
+                "lower_is_better": True,
+            },
+        )

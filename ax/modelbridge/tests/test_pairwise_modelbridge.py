@@ -4,92 +4,128 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from unittest import mock
+# pyre-strict
 
 import numpy as np
 import torch
+from ax.core import Metric, Objective, OptimizationConfig
 from ax.core.observation import ObservationData, ObservationFeatures
-from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.pairwise import (
     _binary_pref_to_comp_pair,
     _consolidate_comparisons,
     PairwiseModelBridge,
 )
+from ax.models.torch.botorch_modular.model import BoTorchModel
+from ax.models.torch.botorch_modular.surrogate import Surrogate
+from ax.utils.common.constants import Keys
 from ax.utils.common.testutils import TestCase
+from ax.utils.common.typeutils import checked_cast
+from ax.utils.testing.preference_stubs import get_pbo_experiment
+from botorch.acquisition.monte_carlo import qNoisyExpectedImprovement
+from botorch.acquisition.preference import (
+    AnalyticExpectedUtilityOfBestOption,
+    qExpectedUtilityOfBestOption,
+)
+from botorch.models.pairwise_gp import PairwiseGP, PairwiseLaplaceMarginalLogLikelihood
+from botorch.models.transforms.input import Normalize
 from botorch.utils.datasets import RankingDataset
 
 
 class PairwiseModelBridgeTest(TestCase):
-    @mock.patch(
-        f"{ModelBridge.__module__}.ModelBridge.__init__",
-        autospec=True,
-        return_value=None,
+    def setUp(self) -> None:
+        super().setUp()
+        experiment = get_pbo_experiment()
+        self.experiment = experiment
+        self.data = experiment.lookup_data()
+
+    @TestCase.ax_long_test(
+        reason="TODO[T199510629] Fix: break up test into one test per case"
     )
-    # pyre-fixme[3]: Return type must be annotated.
-    # pyre-fixme[2]: Parameter must be annotated.
-    def test_PairwiseModelBridge(self, mock_init):
-        # Test _convert_observations
-        pmb = PairwiseModelBridge(
-            # pyre-fixme[6]: For 1st param expected `Experiment` but got `None`.
-            experiment=None,
-            # pyre-fixme[6]: For 2nd param expected `SearchSpace` but got `None`.
-            search_space=None,
-            # pyre-fixme[6]: For 3rd param expected `Data` but got `None`.
-            data=None,
-            # pyre-fixme[6]: For 4th param expected `TorchModel` but got `None`.
-            model=None,
-            transforms=[],
-            torch_dtype=None,
-            torch_device=None,
+    def test_PairwiseModelBridge(self) -> None:
+        surrogate = Surrogate(
+            botorch_model_class=PairwiseGP,
+            mll_class=PairwiseLaplaceMarginalLogLikelihood,
+            input_transform_classes=[Normalize],
+            input_transform_options={
+                "Normalize": {"d": len(self.experiment.parameters)}
+            },
         )
+
+        cases = [
+            (qNoisyExpectedImprovement, None, 3),
+            (qExpectedUtilityOfBestOption, None, 3),
+            (
+                AnalyticExpectedUtilityOfBestOption,
+                # Analytic Acqfs do not support pending points and sequential opt
+                {"optimizer_kwargs": {"sequential": False}},
+                2,  # analytic EUBO only supports n=2
+            ),
+        ]
+        for botorch_acqf_class, model_gen_options, n in cases:
+            pmb = PairwiseModelBridge(
+                experiment=self.experiment,
+                search_space=self.experiment.search_space,
+                data=self.data,
+                model=BoTorchModel(
+                    botorch_acqf_class=botorch_acqf_class,
+                    surrogate=surrogate,
+                ),
+                transforms=[],
+                optimization_config=OptimizationConfig(
+                    Objective(
+                        Metric(Keys.PAIRWISE_PREFERENCE_QUERY.value), minimize=False
+                    )
+                ),
+                fit_tracking_metrics=False,
+            )
+            # Can generate candidates correctly
+            # pyre-ignore: Incompatible parameter type [6]
+            generator_run = pmb.gen(n=n, model_gen_options=model_gen_options)
+            self.assertEqual(len(generator_run.arms), n)
 
         observation_data = [
             ObservationData(
-                metric_names=["pairwise_pref_query"],
+                metric_names=[Keys.PAIRWISE_PREFERENCE_QUERY.value],
                 means=np.array([0]),
                 covariance=np.array([[np.nan]]),
             ),
             ObservationData(
-                metric_names=["pairwise_pref_query"],
+                metric_names=[Keys.PAIRWISE_PREFERENCE_QUERY.value],
                 means=np.array([1]),
                 covariance=np.array([[np.nan]]),
             ),
         ]
         observation_features = [
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
-            ObservationFeatures(parameters={"y1": 0.1, "y2": 0.2}, trial_index=0),
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
-            ObservationFeatures(parameters={"y1": 0.3, "y2": 0.4}, trial_index=0),
+            ObservationFeatures(parameters={"x1": 0.1, "x2": 0.2}, trial_index=0),
+            ObservationFeatures(parameters={"x1": 0.3, "x2": 0.4}, trial_index=0),
         ]
         observation_features_with_metadata = [
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
-            ObservationFeatures(parameters={"y1": 0.1, "y2": 0.2}, trial_index=0),
+            ObservationFeatures(parameters={"x1": 0.1, "x2": 0.2}, trial_index=0),
             ObservationFeatures(
-                parameters={"y1": 0.3, "y2": 0.4},
-                # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
+                parameters={"x1": 0.3, "x2": 0.4},
                 trial_index=0,
                 metadata={"metadata_key": "metadata_val"},
             ),
         ]
-        parameters = ["y1", "y2"]
-        outcomes = ["pairwise_pref_query"]
+        parameter_names = list(self.experiment.parameters.keys())
+        outcomes = [checked_cast(str, Keys.PAIRWISE_PREFERENCE_QUERY.value)]
 
-        datasets, candidate_metadata = pmb._convert_observations(
+        datasets, _, candidate_metadata = pmb._convert_observations(
             observation_data=observation_data,
             observation_features=observation_features,
             outcomes=outcomes,
-            parameters=parameters,
+            parameters=parameter_names,
             search_space_digest=None,
         )
         self.assertTrue(len(datasets) == 1)
         self.assertTrue(isinstance(datasets[0], RankingDataset))
         self.assertTrue(candidate_metadata is None)
 
-        datasets, candidate_metadata = pmb._convert_observations(
+        datasets, _, candidate_metadata = pmb._convert_observations(
             observation_data=observation_data,
             observation_features=observation_features_with_metadata,
             outcomes=outcomes,
-            parameters=parameters,
+            parameters=parameter_names,
             search_space_digest=None,
         )
         self.assertTrue(len(datasets) == 1)

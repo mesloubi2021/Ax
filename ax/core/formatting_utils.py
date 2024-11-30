@@ -4,8 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from enum import Enum
-from typing import cast, Dict, List, Optional, Tuple, Type, Union
+from typing import cast
 
 import numpy as np
 from ax.core.data import Data
@@ -17,7 +19,7 @@ from ax.core.types import (
     validate_evaluation_outcome,
 )
 from ax.exceptions.core import UserInputError
-from ax.utils.common.typeutils import numpy_type_to_python_type
+from ax.utils.common.typeutils_nonnative import numpy_type_to_python_type
 
 
 # -------------------- Data formatting utils. ---------------------
@@ -28,7 +30,7 @@ class DataType(Enum):
     MAP_DATA = 3
 
 
-DATA_TYPE_LOOKUP: Dict[DataType, Type[Data]] = {
+DATA_TYPE_LOOKUP: dict[DataType, type[Data]] = {
     DataType.DATA: Data,
     DataType.MAP_DATA: MapData,
 }
@@ -36,7 +38,7 @@ DATA_TYPE_LOOKUP: Dict[DataType, Type[Data]] = {
 
 def raw_data_to_evaluation(
     raw_data: TEvaluationOutcome,
-    metric_names: List[str],
+    metric_names: list[str],
 ) -> TEvaluationOutcome:
     """Format the trial evaluation data to a standard `TTrialEvaluation`
     (mapping from metric names to a tuple of mean and SEM) representation, or
@@ -53,7 +55,7 @@ def raw_data_to_evaluation(
                 if not isinstance(dat, (float, int)):
                     raise UserInputError(
                         "Raw data for an arm is expected to either be a tuple of "
-                        "numerical mean and SEM or just a numerical mean."
+                        "numerical mean and SEM or just a numerical mean. "
                         f"Got: {dat} for metric '{metric_name}'."
                     )
                 raw_data[metric_name] = (float(dat), None)
@@ -95,14 +97,14 @@ def raw_data_to_evaluation(
 
 
 def data_and_evaluations_from_raw_data(
-    raw_data: Dict[str, TEvaluationOutcome],
-    metric_names: List[str],
+    raw_data: dict[str, TEvaluationOutcome],
+    metric_names: list[str],
     trial_index: int,
-    sample_sizes: Dict[str, int],
+    sample_sizes: dict[str, int],
     data_type: DataType,
-    start_time: Optional[Union[int, str]] = None,
-    end_time: Optional[Union[int, str]] = None,
-) -> Tuple[Dict[str, TEvaluationOutcome], Data]:
+    start_time: int | str | None = None,
+    end_time: int | str | None = None,
+) -> tuple[dict[str, TEvaluationOutcome], Data]:
     """Transforms evaluations into Ax Data.
 
     Each evaluation is either a trial evaluation: {metric_name -> (mean, SEM)}
@@ -143,7 +145,7 @@ def data_and_evaluations_from_raw_data(
             )
         # All evaluations are no-fidelity evaluations.
         data = Data.from_evaluations(
-            evaluations=cast(Dict[str, TTrialEvaluation], evaluations),
+            evaluations=cast(dict[str, TTrialEvaluation], evaluations),
             trial_index=trial_index,
             sample_sizes=sample_sizes,
             start_time=start_time,
@@ -159,7 +161,7 @@ def data_and_evaluations_from_raw_data(
             )
         # All evaluations are map evaluations.
         data = MapData.from_map_evaluations(
-            evaluations=cast(Dict[str, TMapTrialEvaluation], evaluations),
+            evaluations=cast(dict[str, TMapTrialEvaluation], evaluations),
             trial_index=trial_index,
         )
     else:

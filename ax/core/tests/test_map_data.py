@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 
 import pandas as pd
 from ax.core.data import Data
@@ -12,6 +14,7 @@ from ax.utils.common.testutils import TestCase
 
 class MapDataTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.df = pd.DataFrame(
             [
                 {
@@ -92,6 +95,19 @@ class MapDataTest(TestCase):
         self.assertEqual(self.mmd.map_key_infos, self.map_key_infos)
         self.assertEqual(self.mmd.map_keys, ["epoch"])
         self.assertEqual(self.mmd.map_key_to_type, {"epoch": int})
+
+    def test_clone(self) -> None:
+        self.mmd._db_id = 1234
+        clone = self.mmd.clone()
+        # Make sure the two objects are equal.
+        self.assertTrue(clone.map_df.equals(self.mmd.map_df))
+        self.assertTrue(clone.df.equals(self.mmd.df))
+        self.assertEqual(clone.map_key_infos, self.mmd.map_key_infos)
+        self.assertEqual(clone.description, self.mmd.description)
+        # Make sure it's not the original object or df.
+        self.assertIsNot(clone, self.mmd)
+        self.assertIsNot(clone.map_df, self.mmd.map_df)
+        self.assertIsNone(clone._db_id)
 
     def test_combine(self) -> None:
         data = MapData.from_multiple_map_data([])
@@ -215,7 +231,7 @@ class MapDataTest(TestCase):
 
         self.assertEqual(
             fresh.df.columns.size,
-            fresh.map_df.columns.size - len(self.mmd.map_key_infos),
+            fresh.map_df.columns.size,
         )
 
         self.assertIsNotNone(fresh._memo_df)  # Assert df is cached after first call

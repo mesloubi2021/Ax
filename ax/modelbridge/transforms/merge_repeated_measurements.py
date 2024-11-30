@@ -4,10 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, List, Optional
+from copy import deepcopy
 
 import numpy as np
 from ax.core.arm import Arm
@@ -32,16 +34,16 @@ class MergeRepeatedMeasurements(Transform):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
-        modelbridge: Optional[ModelBridge] = None,
-        config: Optional[TConfig] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
+        modelbridge: ModelBridge | None = None,
+        config: TConfig | None = None,
     ) -> None:
         if observations is None:
             raise RuntimeError("MergeRepeatedMeasurements requires observations")
         # create a mapping of arm_key -> {metric_name: {means: [], vars: []}}
-        arm_to_multi_obs: DefaultDict[
-            str, DefaultDict[str, DefaultDict[str, List[float]]]
+        arm_to_multi_obs: defaultdict[
+            str, defaultdict[str, defaultdict[str, list[float]]]
         ] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
         observation_features, observation_data = separate_observations(observations)
         for j, obsd in enumerate(observation_data):
@@ -60,7 +62,7 @@ class MergeRepeatedMeasurements(Transform):
                 arm_to_multi_obs[key][m]["means"].append(obsd.means[i])
                 arm_to_multi_obs[key][m]["vars"].append(obsd.covariance[i, i])
 
-        self.arm_to_merged: DefaultDict[str, Dict[str, Dict[str, float]]] = defaultdict(
+        self.arm_to_merged: defaultdict[str, dict[str, dict[str, float]]] = defaultdict(
             dict
         )
         for k, metric_dict in arm_to_multi_obs.items():
@@ -93,16 +95,17 @@ class MergeRepeatedMeasurements(Transform):
 
     def transform_observations(
         self,
-        observations: List[Observation],
-    ) -> List[Observation]:
+        observations: list[Observation],
+    ) -> list[Observation]:
         # Transform observations
         new_observations = []
         observation_features, observation_data = separate_observations(observations)
+        arm_to_merged = deepcopy(self.arm_to_merged)
         for j, obsd in enumerate(observation_data):
             key = Arm.md5hash(observation_features[j].parameters)
             # pop to ensure that the resulting observations list has one
             # observation per unique arm
-            metric_dict = self.arm_to_merged.pop(key, None)
+            metric_dict = arm_to_merged.pop(key, None)
             if metric_dict is None:
                 continue
             merged_means = np.zeros(len(obsd.metric_names))
@@ -118,6 +121,10 @@ class MergeRepeatedMeasurements(Transform):
                 means=merged_means,
                 covariance=merged_covariance,
             )
-            new_obs = Observation(features=observation_features[j], data=new_obsd)
+            new_obs = Observation(
+                features=observation_features[j],
+                data=new_obsd,
+                arm_name=observations[j].arm_name,
+            )
             new_observations.append(new_obs)
         return new_observations

@@ -4,10 +4,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+import json
+from datetime import datetime
 from enum import Enum
 
 from logging import Logger
-from typing import Any, cast, Dict, List, Optional, Tuple, Type
+from typing import Any, cast
+
+from ax.analysis.analysis import AnalysisCard
 
 from ax.core.arm import Arm
 from ax.core.base_trial import BaseTrial
@@ -43,6 +49,7 @@ from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.storage.json_store.encoder import object_to_json
 from ax.storage.sqa_store.sqa_classes import (
     SQAAbandonedArm,
+    SQAAnalysisCard,
     SQAArm,
     SQAData,
     SQAExperiment,
@@ -60,7 +67,8 @@ from ax.utils.common.base import Base
 from ax.utils.common.constants import Keys
 from ax.utils.common.logger import get_logger
 from ax.utils.common.serialization import serialize_init_args
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
@@ -78,19 +86,11 @@ class Encoder:
     def __init__(self, config: SQAConfig) -> None:
         self.config = config
 
-        # TODO[T113829027] Remove this in a couple months
-        self.EXTRA_REGISTRY_ERROR_NOTE = (
-            "ATTENTION: There have been some recent "
-            "changes to Metric/Runner registration in Ax. Please see "
-            "https://ax.dev/tutorials/gpei_hartmann_developer.html#9.-Save-to-JSON-or-SQL "  # noqa
-            "for the most up-to-date information on saving custom metrics."
-        )
-
     @classmethod
     def validate_experiment_metadata(
         cls,
         experiment: Experiment,
-        existing_sqa_experiment_id: Optional[int],
+        existing_sqa_experiment_id: int | None,
     ) -> None:
         """Validates required experiment metadata."""
         if experiment.db_id is not None:
@@ -117,19 +117,28 @@ class Encoder:
                 )
 
     def get_enum_value(
-        self, value: Optional[str], enum: Optional[Enum]
-    ) -> Optional[int]:
+        self, value: str | None, enum: Enum | type[Enum] | None
+    ) -> int | None:
         """Given an enum name (string) and an enum (of ints), return the
         corresponding enum value. If the name is not present in the enum,
         throw an error.
         """
-        if value is None or enum is None:
+        if value is None:
             return None
 
+        error = SQAEncodeError(
+            f"Value {value} is invalid for enum {enum}.  You may be "
+            "using a registry or config that doesn't support the value "
+            "you are trying to save."
+        )
+        if enum is None:
+            raise error
+
         try:
-            return enum[value].value  # pyre-ignore T29651755
+            # pyre-ignore[16]: `Enum` has no attribute `__getitem__`. T29651755
+            return enum[value].value
         except KeyError:
-            raise SQAEncodeError(f"Value {value} is invalid for enum {enum}.")
+            raise error
 
     def experiment_to_sqa(self, experiment: Experiment) -> SQAExperiment:
         """Convert Ax Experiment to SQLAlchemy.
@@ -138,6 +147,13 @@ class Encoder:
         create and store copies of the Trials, Metrics, Parameters,
         ParameterConstraints, and Runner owned by this Experiment.
         """
+
+        logger.error(
+            "ATTENTION: The Ax team is considering deprecating SQLAlchemy storage. "
+            "If you are currently using SQLAlchemy storage, please reach out to us "
+            "via GitHub Issues here: https://github.com/facebook/Ax/issues/2975"
+        )
+
         optimization_metrics = self.optimization_config_to_sqa(
             experiment.optimization_config
         )
@@ -153,8 +169,8 @@ class Encoder:
         status_quo_name = None
         status_quo_parameters = None
         if experiment.status_quo is not None:
-            status_quo_name = not_none(experiment.status_quo).name
-            status_quo_parameters = not_none(experiment.status_quo).parameters
+            status_quo_name = none_throws(experiment.status_quo).name
+            status_quo_parameters = none_throws(experiment.status_quo).parameters
 
         trials = []
         for trial in experiment.trials.values():
@@ -167,12 +183,21 @@ class Encoder:
             value=experiment.experiment_type, enum=self.config.experiment_type_enum
         )
 
+        auxiliary_experiments_by_purpose = {}
+        for (
+            aux_exp_type_enum,
+            aux_exps,
+        ) in experiment.auxiliary_experiments_by_purpose.items():
+            aux_exp_type = aux_exp_type_enum.value
+            aux_exp_jsons = [aux_exp.experiment.name for aux_exp in aux_exps]
+            auxiliary_experiments_by_purpose[aux_exp_type] = aux_exp_jsons
+
         properties = experiment._properties
         runners = []
         if isinstance(experiment, MultiTypeExperiment):
             properties[Keys.SUBCLASS] = "MultiTypeExperiment"
             for trial_type, runner in experiment._trial_type_to_runner.items():
-                runner_sqa = self.runner_to_sqa(runner, trial_type)
+                runner_sqa = self.runner_to_sqa(none_throws(runner), trial_type)
                 runners.append(runner_sqa)
 
             for metric in tracking_metrics:
@@ -182,10 +207,10 @@ class Encoder:
                         metric.name
                     ]
         elif experiment.runner:
-            runners.append(self.runner_to_sqa(not_none(experiment.runner)))
+            runners.append(self.runner_to_sqa(none_throws(experiment.runner)))
 
         # pyre-ignore[9]: Expected `Base` for 1st...yping.Type[Experiment]`.
-        experiment_class: Type[SQAExperiment] = self.config.class_to_sqa_class[
+        experiment_class: type[SQAExperiment] = self.config.class_to_sqa_class[
             Experiment
         ]
         exp_sqa = experiment_class(
@@ -206,6 +231,7 @@ class Encoder:
             properties=properties,
             default_trial_type=experiment.default_trial_type,
             default_data_type=experiment.default_data_type,
+            auxiliary_experiments_by_purpose=auxiliary_experiments_by_purpose,
         )
         return exp_sqa
 
@@ -214,6 +240,12 @@ class Encoder:
         # pyre-fixme[9]: Expected `Base` for 1st...typing.Type[Parameter]`.
         parameter_class: SQAParameter = self.config.class_to_sqa_class[Parameter]
         if isinstance(parameter, RangeParameter):
+            if parameter.logit_scale:
+                raise NotImplementedError(
+                    "Cannot encode logit-scale parameter to SQLAlchemy because "
+                    "the DB schema does not have a corresponding column. "
+                    "Please reach out to the AE team if you need this feature. "
+                )
             # pyre-fixme[29]: `SQAParameter` is not a function.
             return parameter_class(
                 id=parameter.db_id,
@@ -294,8 +326,8 @@ class Encoder:
             )
 
     def search_space_to_sqa(
-        self, search_space: Optional[SearchSpace]
-    ) -> Tuple[List[SQAParameter], List[SQAParameterConstraint]]:
+        self, search_space: SearchSpace | None
+    ) -> tuple[list[SQAParameter], list[SQAParameterConstraint]]:
         """Convert Ax SearchSpace to a list of SQLAlchemy Parameters and
         ParameterConstraints.
         """
@@ -372,7 +404,7 @@ class Encoder:
 
     def robust_search_space_to_sqa(
         self, rss: RobustSearchSpace
-    ) -> Tuple[List[SQAParameter], List[SQAParameterConstraint]]:
+    ) -> tuple[list[SQAParameter], list[SQAParameterConstraint]]:
         parameters, parameter_constraints = [], []
         for parameter in rss._parameters.values():
             parameters.append(self.parameter_to_sqa(parameter=parameter))
@@ -395,7 +427,7 @@ class Encoder:
 
     def get_metric_type_and_properties(
         self, metric: Metric
-    ) -> Tuple[int, Dict[str, Any]]:
+    ) -> tuple[int, dict[str, Any]]:
         """Given an Ax Metric, convert its type into a member of MetricType enum,
         and construct a dictionary to be stored in the database `properties`
         json blob.
@@ -408,7 +440,6 @@ class Encoder:
                 f"subclass ({metric_class}) is missing from the registry. "
                 "The metric registry currently contains the following: "
                 f"{','.join(map(str, self.config.metric_registry.keys()))} "
-                f"{self.EXTRA_REGISTRY_ERROR_NOTE}"
             )
 
         properties = metric_class.serialize_init_args(obj=metric)
@@ -435,8 +466,8 @@ class Encoder:
         )
 
     def get_children_metrics_by_name(
-        self, metrics: List[Metric], weights: List[float]
-    ) -> Dict[str, Tuple[Metric, float, SQAMetric, Tuple[int, Dict[str, Any]]]]:
+        self, metrics: list[Metric], weights: list[float]
+    ) -> dict[str, tuple[Metric, float, SQAMetric, tuple[int, dict[str, Any]]]]:
         return {
             metric.name: (
                 metric,
@@ -674,8 +705,8 @@ class Encoder:
         )
 
     def optimization_config_to_sqa(
-        self, optimization_config: Optional[OptimizationConfig]
-    ) -> List[SQAMetric]:
+        self, optimization_config: OptimizationConfig | None
+    ) -> list[SQAMetric]:
         """Convert Ax OptimizationConfig to a list of SQLAlchemy Metrics."""
         if optimization_config is None:
             return []
@@ -701,7 +732,7 @@ class Encoder:
             metrics_sqa.append(risk_measure_sqa)
         return metrics_sqa
 
-    def arm_to_sqa(self, arm: Arm, weight: Optional[float] = 1.0) -> SQAArm:
+    def arm_to_sqa(self, arm: Arm, weight: float | None = 1.0) -> SQAArm:
         """Convert Ax Arm to SQLAlchemy."""
         # pyre-fixme: Expected `Base` for 1st... got `typing.Type[Arm]`.
         arm_class: SQAArm = self.config.class_to_sqa_class[Arm]
@@ -727,7 +758,7 @@ class Encoder:
     def generator_run_to_sqa(
         self,
         generator_run: GeneratorRun,
-        weight: Optional[float] = None,
+        weight: float | None = None,
         reduced_state: bool = False,
     ) -> SQAGeneratorRun:
         """Convert Ax GeneratorRun to SQLAlchemy.
@@ -787,47 +818,56 @@ class Encoder:
             best_arm_predictions=best_arm_predictions,
             model_predictions=model_predictions,
             model_key=generator_run._model_key,
-            model_kwargs=object_to_json(
-                generator_run._model_kwargs,
-                encoder_registry=self.config.json_encoder_registry,
-                class_encoder_registry=self.config.json_class_encoder_registry,
-            )
-            if not reduced_state
-            else None,
-            bridge_kwargs=object_to_json(
-                generator_run._bridge_kwargs,
-                encoder_registry=self.config.json_encoder_registry,
-                class_encoder_registry=self.config.json_class_encoder_registry,
-            )
-            if not reduced_state
-            else None,
-            gen_metadata=object_to_json(
-                generator_run._gen_metadata,
-                encoder_registry=self.config.json_encoder_registry,
-                class_encoder_registry=self.config.json_class_encoder_registry,
-            )
-            if not reduced_state
-            else None,
-            model_state_after_gen=object_to_json(
-                generator_run._model_state_after_gen,
-                encoder_registry=self.config.json_encoder_registry,
-                class_encoder_registry=self.config.json_class_encoder_registry,
-            )
-            if not reduced_state
-            else None,
+            model_kwargs=(
+                object_to_json(
+                    generator_run._model_kwargs,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if not reduced_state
+                else None
+            ),
+            bridge_kwargs=(
+                object_to_json(
+                    generator_run._bridge_kwargs,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if not reduced_state
+                else None
+            ),
+            gen_metadata=(
+                object_to_json(
+                    generator_run._gen_metadata,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if not reduced_state
+                else None
+            ),
+            model_state_after_gen=(
+                object_to_json(
+                    generator_run._model_state_after_gen,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if not reduced_state
+                else None
+            ),
             generation_step_index=generator_run._generation_step_index,
             candidate_metadata_by_arm_signature=object_to_json(
                 generator_run._candidate_metadata_by_arm_signature,
                 encoder_registry=self.config.json_encoder_registry,
                 class_encoder_registry=self.config.json_class_encoder_registry,
             ),
+            generation_node_name=generator_run._generation_node_name,
         )
         return gr_sqa
 
     def generation_strategy_to_sqa(
         self,
         generation_strategy: GenerationStrategy,
-        experiment_id: Optional[int],
+        experiment_id: int | None,
         generator_run_reduced_state: bool = False,
     ) -> SQAGenerationStrategy:
         """Convert an Ax `GenerationStrategy` to SQLAlchemy, preserving its state,
@@ -836,9 +876,10 @@ class Encoder:
         """
         # pyre-ignore[9]: Expected Base, but redeclared to `SQAGenerationStrategy`.
         gs_class: SQAGenerationStrategy = self.config.class_to_sqa_class[
-            cast(Type[Base], GenerationStrategy)
+            cast(type[Base], GenerationStrategy)
         ]
         generator_runs_sqa = []
+        node_based_strategy = generation_strategy.is_node_based
         for idx, gr in enumerate(generation_strategy._generator_runs):
             # Never reduce the state of the last generator run because that
             # generator run is needed to recreate the model when reloading the
@@ -852,20 +893,36 @@ class Encoder:
         gs_sqa = gs_class(
             id=generation_strategy.db_id,
             name=generation_strategy.name,
-            steps=object_to_json(
-                generation_strategy._steps,
-                encoder_registry=self.config.json_encoder_registry,
-                class_encoder_registry=self.config.json_class_encoder_registry,
+            steps=(
+                object_to_json(
+                    generation_strategy._steps,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if not node_based_strategy
+                else []
             ),
-            curr_index=generation_strategy._curr.index,
+            curr_index=(
+                generation_strategy.current_step_index
+                if not node_based_strategy
+                else -1
+            ),
             generator_runs=generator_runs_sqa,
             experiment_id=experiment_id,
+            nodes=(
+                object_to_json(
+                    generation_strategy._nodes,
+                    encoder_registry=self.config.json_encoder_registry,
+                    class_encoder_registry=self.config.json_class_encoder_registry,
+                )
+                if node_based_strategy
+                else []
+            ),
+            curr_node_name=generation_strategy.current_node_name,
         )
         return gs_sqa
 
-    def runner_to_sqa(
-        self, runner: Runner, trial_type: Optional[str] = None
-    ) -> SQARunner:
+    def runner_to_sqa(self, runner: Runner, trial_type: str | None = None) -> SQARunner:
         """Convert Ax Runner to SQLAlchemy."""
         runner_class = type(runner)
         runner_type = self.config.runner_registry.get(runner_class)
@@ -875,10 +932,8 @@ class Encoder:
                 f"subclass ({runner_class}) is missing from the registry. "
                 "The runner registry currently contains the following: "
                 f"{','.join(map(str, self.config.runner_registry.keys()))} "
-                f"{self.EXTRA_REGISTRY_ERROR_NOTE}"
             )
         properties = runner_class.serialize_init_args(obj=runner)
-
         # pyre-fixme: Expected `Base` for 1st...t `typing.Type[Runner]`.
         runner_class: SQARunner = self.config.class_to_sqa_class[Runner]
         # pyre-fixme[29]: `SQARunner` is not a function.
@@ -900,7 +955,7 @@ class Encoder:
 
         runner = None
         if trial.runner:
-            runner = self.runner_to_sqa(runner=not_none(trial.runner))
+            runner = self.runner_to_sqa(runner=none_throws(trial.runner))
 
         abandoned_arms = []
         generator_runs = []
@@ -910,7 +965,7 @@ class Encoder:
 
         if isinstance(trial, Trial) and trial.generator_run:
             gr_sqa = self.generator_run_to_sqa(
-                generator_run=not_none(trial.generator_run),
+                generator_run=none_throws(trial.generator_run),
                 reduced_state=generator_run_reduced_state,
             )
             generator_runs.append(gr_sqa)
@@ -992,7 +1047,7 @@ class Encoder:
         )
         return trial_sqa
 
-    def experiment_data_to_sqa(self, experiment: Experiment) -> List[SQAData]:
+    def experiment_data_to_sqa(self, experiment: Experiment) -> list[SQAData]:
         """Convert Ax experiment data to SQLAlchemy."""
         return [
             self.data_to_sqa(data=data, trial_index=trial_index, timestamp=timestamp)
@@ -1001,7 +1056,7 @@ class Encoder:
         ]
 
     def data_to_sqa(
-        self, data: Data, trial_index: Optional[int], timestamp: int
+        self, data: Data, trial_index: int | None, timestamp: int
     ) -> SQAData:
         """Convert Ax data to SQLAlchemy."""
         # pyre-fixme: Expected `Base` for 1st...ot `typing.Type[Data]`.
@@ -1022,4 +1077,31 @@ class Encoder:
                     class_encoder_registry=self.config.json_class_encoder_registry,
                 )
             ),
+        )
+
+    def analysis_card_to_sqa(
+        self,
+        analysis_card: AnalysisCard,
+        experiment_id: int,
+        timestamp: datetime,
+    ) -> SQAAnalysisCard:
+        """Convert Ax analysis to SQLAlchemy."""
+        # pyre-fixme: Expected `Base` for 1st...ot `typing.Type[BaseAnalysis]`.
+        analysis_card_class: SQAAnalysisCard = self.config.class_to_sqa_class[
+            AnalysisCard
+        ]
+
+        # pyre-fixme[29]: `SQAAnalysisCard` is not a function.
+        return analysis_card_class(
+            id=analysis_card.db_id,
+            name=analysis_card.name,
+            title=analysis_card.title,
+            subtitle=analysis_card.subtitle,
+            level=analysis_card.level,
+            dataframe_json=analysis_card.df.to_json(),
+            blob=analysis_card.blob,
+            blob_annotation=analysis_card.blob_annotation,
+            time_created=timestamp,
+            experiment_id=experiment_id,
+            attributes=json.dumps(analysis_card.attributes),
         )

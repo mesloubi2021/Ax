@@ -4,8 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.arm import Arm
 from ax.core.generator_run import GeneratorRun
+from ax.exceptions.core import UnsupportedError
 from ax.utils.common.testutils import TestCase
 from ax.utils.testing.core_stubs import (
     get_arms,
@@ -22,6 +25,7 @@ GENERATOR_RUN_STR_PLUS_1 = "GeneratorRun(3 arms, total weight 4.0)"
 
 class GeneratorRunTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.model_predictions = get_model_predictions()
         self.optimization_config = get_optimization_config()
         self.search_space = get_search_space()
@@ -107,7 +111,7 @@ class GeneratorRunTest(TestCase):
     def test_Index(self) -> None:
         self.assertIsNone(self.unweighted_run.index)
         self.unweighted_run.index = 1
-        with self.assertRaises(ValueError):
+        with self.assertRaises(UnsupportedError):
             self.unweighted_run.index = 2
 
     def test_ModelPredictions(self) -> None:

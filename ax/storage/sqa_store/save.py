@@ -4,17 +4,25 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import os
+from collections.abc import Callable, Sequence
+from datetime import datetime
 
 from logging import Logger
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, cast
+
+from ax.analysis.analysis import AnalysisCard
 
 from ax.core.base_trial import BaseTrial
+from ax.core.data import Data
 from ax.core.experiment import Experiment
 from ax.core.generator_run import GeneratorRun
 from ax.core.metric import Metric
 from ax.core.outcome_constraint import ObjectiveThreshold, OutcomeConstraint
 from ax.core.runner import Runner
+from ax.core.trial import Trial
 from ax.exceptions.core import UserInputError
 from ax.exceptions.storage import SQADecodeError
 from ax.modelbridge.generation_strategy import GenerationStrategy
@@ -32,18 +40,19 @@ from ax.storage.sqa_store.sqa_config import SQAConfig
 from ax.storage.sqa_store.utils import copy_db_ids
 from ax.utils.common.base import Base
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 logger: Logger = get_logger(__name__)
 
 
-def save_experiment(experiment: Experiment, config: Optional[SQAConfig] = None) -> None:
+def save_experiment(experiment: Experiment, config: SQAConfig | None = None) -> None:
     """Save experiment (using default SQAConfig)."""
     if not isinstance(experiment, Experiment):
         raise ValueError("Can only save instances of Experiment")
     if not experiment.has_name:
         raise ValueError("Experiment name must be set prior to saving.")
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     encoder = Encoder(config=config)
     decoder = Decoder(config=config)
     _save_experiment(experiment=experiment, encoder=encoder, decoder=decoder)
@@ -54,8 +63,8 @@ def _save_experiment(
     encoder: Encoder,
     decoder: Decoder,
     return_sqa: bool = False,
-    validation_kwargs: Optional[Dict[str, Any]] = None,
-) -> Optional[SQABase]:
+    validation_kwargs: dict[str, Any] | None = None,
+) -> SQABase | None:
     """Save experiment, using given Encoder instance.
 
     1) Convert Ax object to SQLAlchemy object.
@@ -93,7 +102,7 @@ def _save_experiment(
 
 
 def save_generation_strategy(
-    generation_strategy: GenerationStrategy, config: Optional[SQAConfig] = None
+    generation_strategy: GenerationStrategy, config: SQAConfig | None = None
 ) -> int:
     """Save generation strategy (using default SQAConfig if no config is
     specified). If the generation strategy has an experiment set, the experiment
@@ -103,7 +112,7 @@ def save_generation_strategy(
         The ID of the saved generation strategy.
     """
     # Start up SQA encoder.
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     encoder = Encoder(config=config)
     decoder = Decoder(config=config)
 
@@ -138,15 +147,15 @@ def _save_generation_strategy(
         decode_args={"experiment": experiment},
     )
 
-    return not_none(generation_strategy.db_id)
+    return none_throws(generation_strategy.db_id)
 
 
 def save_or_update_trial(
-    experiment: Experiment, trial: BaseTrial, config: Optional[SQAConfig] = None
+    experiment: Experiment, trial: BaseTrial, config: SQAConfig | None = None
 ) -> None:
     """Add new trial to the experiment, or update if already exists
     (using default SQAConfig)."""
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     encoder = Encoder(config=config)
     decoder = Decoder(config=config)
     _save_or_update_trial(
@@ -173,9 +182,9 @@ def _save_or_update_trial(
 
 def save_or_update_trials(
     experiment: Experiment,
-    trials: List[BaseTrial],
-    config: Optional[SQAConfig] = None,
-    batch_size: Optional[int] = None,
+    trials: list[BaseTrial],
+    config: SQAConfig | None = None,
+    batch_size: int | None = None,
     reduce_state_generator_runs: bool = False,
 ) -> None:
     """Add new trials to the experiment, or update if already exists
@@ -185,7 +194,7 @@ def save_or_update_trials(
     will also be added to the experiment, but existing data objects in the
     database will *not* be updated or removed.
     """
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     encoder = Encoder(config=config)
     decoder = Decoder(config=config)
     _save_or_update_trials(
@@ -200,10 +209,10 @@ def save_or_update_trials(
 
 def _save_or_update_trials(
     experiment: Experiment,
-    trials: List[BaseTrial],
+    trials: list[BaseTrial],
     encoder: Encoder,
     decoder: Decoder,
-    batch_size: Optional[int] = None,
+    batch_size: int | None = None,
     reduce_state_generator_runs: bool = False,
 ) -> None:
     """Add new trials to the experiment, or update if they already exist.
@@ -212,21 +221,19 @@ def _save_or_update_trials(
     will also be added to the experiment, but existing data objects in the
     database will *not* be updated or removed.
     """
-    experiment_id = experiment._db_id
-    if experiment_id is None:
-        raise ValueError("Must save experiment first.")
+    if experiment._db_id is None:
+        raise ValueError("Must save experiment before saving/updating its trials.")
 
-    # pyre-fixme[53]: Captured variable `experiment_id` is not annotated.
-    # pyre-fixme[3]: Return type must be annotated.
-    def add_experiment_id(sqa: Union[SQATrial, SQAData]):
+    experiment_id: int = experiment._db_id
+
+    def add_experiment_id(sqa: SQATrial) -> None:
         sqa.experiment_id = experiment_id
 
     if reduce_state_generator_runs:
         latest_trial = trials[-1]
         trials_to_reduce_state = trials[0:-1]
 
-        # pyre-fixme[3]: Return type must be annotated.
-        def trial_to_reduced_state_sqa_encoder(t: BaseTrial):
+        def trial_to_reduced_state_sqa_encoder(t: BaseTrial) -> SQATrial:
             return encoder.trial_to_sqa(t, generator_run_reduced_state=True)
 
         _bulk_merge_into_session(
@@ -256,16 +263,53 @@ def _save_or_update_trials(
             batch_size=batch_size,
         )
 
-    datas = []
-    data_encode_args = []
+    save_or_update_data_for_trials(
+        experiment=experiment,
+        trials=trials,
+        encoder=encoder,
+        decoder=decoder,
+        batch_size=batch_size,
+    )
+
+
+def save_or_update_data_for_trials(
+    experiment: Experiment,
+    trials: list[BaseTrial],
+    encoder: Encoder,
+    decoder: Decoder,
+    batch_size: int | None = None,
+    update_trial_statuses: bool = False,
+) -> None:
+    if experiment.db_id is None:
+        raise ValueError("Must save experiment before saving/updating its data.")
+
+    def add_experiment_id(sqa: SQAData) -> None:
+        sqa.experiment_id = experiment.db_id
+
+    datas, data_encode_args, datas_to_keep, trial_idcs = [], [], [], []
+    data_sqa_class: type[SQAData] = cast(
+        type[SQAData], encoder.config.class_to_sqa_class[Data]
+    )
     for trial in trials:
+        trial_idcs.append(trial.index)
         trial_datas = experiment.data_by_trial.get(trial.index, {})
         for ts, data in trial_datas.items():
             if data.db_id is None:
-                # Only need to worry about new data, since it's not really possible
-                # or supported to modify or remove existing data.
+                # This is data we have not saved before; we should add it to the
+                # database. Previously saved data for this experiment can be removed.
                 datas.append(data)
                 data_encode_args.append({"trial_index": trial.index, "timestamp": ts})
+            else:
+                datas_to_keep.append(data.db_id)
+
+        # For trials, for which we saved new data, we can first remove previously
+        # saved data if it's no longer on the experiment.
+        with session_scope() as session:
+            session.query(data_sqa_class).filter_by(
+                experiment_id=experiment.db_id
+            ).filter(data_sqa_class.trial_index.isnot(None)).filter(
+                data_sqa_class.trial_index.in_(trial_idcs)
+            ).filter(data_sqa_class.id not in datas_to_keep).delete()
 
     _bulk_merge_into_session(
         objs=datas,
@@ -280,17 +324,21 @@ def _save_or_update_trials(
         batch_size=batch_size,
     )
 
+    if update_trial_statuses:
+        for trial in trials:
+            update_trial_status(trial_with_updated_status=trial, config=encoder.config)
+
 
 def update_generation_strategy(
     generation_strategy: GenerationStrategy,
-    generator_runs: List[GeneratorRun],
-    config: Optional[SQAConfig] = None,
-    batch_size: Optional[int] = None,
+    generator_runs: list[GeneratorRun],
+    config: SQAConfig | None = None,
+    batch_size: int | None = None,
     reduce_state_generator_runs: bool = False,
 ) -> None:
     """Update generation strategy's current step and attach generator runs
     (using default SQAConfig)."""
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     encoder = Encoder(config=config)
     decoder = Decoder(config=config)
     _update_generation_strategy(
@@ -305,10 +353,10 @@ def update_generation_strategy(
 
 def _update_generation_strategy(
     generation_strategy: GenerationStrategy,
-    generator_runs: List[GeneratorRun],
+    generator_runs: list[GeneratorRun],
     encoder: Encoder,
     decoder: Decoder,
-    batch_size: Optional[int] = None,
+    batch_size: int | None = None,
     reduce_state_generator_runs: bool = False,
 ) -> None:
     """Update generation strategy's current step and attach generator runs."""
@@ -325,11 +373,19 @@ def _update_generation_strategy(
             "should be saved before generation strategy."
         )
 
+    curr_index = (
+        None
+        if generation_strategy.is_node_based
+        else generation_strategy.current_step_index
+    )
+    # there is always a node name
+    curr_node_name = generation_strategy.current_node_name
     with session_scope() as session:
         session.query(gs_sqa_class).filter_by(id=gs_id).update(
             {
-                "curr_index": generation_strategy._curr.index,
+                "curr_index": curr_index,
                 "experiment_id": experiment_id,
+                "curr_node_name": curr_node_name,
             }
         )
 
@@ -339,7 +395,7 @@ def _update_generation_strategy(
         sqa.generation_strategy_id = gs_id
 
     # pyre-fixme[3]: Return type must be annotated.
-    def generator_run_to_sqa_encoder(gr: GeneratorRun, weight: Optional[float] = None):
+    def generator_run_to_sqa_encoder(gr: GeneratorRun, weight: float | None = None):
         return encoder.generator_run_to_sqa(
             gr,
             weight=weight,
@@ -395,7 +451,7 @@ def update_outcome_constraint_on_experiment(
 ) -> None:
     oc_sqa_class = encoder.config.class_to_sqa_class[Metric]
 
-    exp_id = experiment.db_id
+    exp_id: int | None = experiment.db_id
     if exp_id is None:
         raise UserInputError("Experiment must be saved before being updated.")
     oc_id = outcome_constraint.db_id
@@ -405,9 +461,7 @@ def update_outcome_constraint_on_experiment(
                 id=oc_id
             ).delete()
 
-    # pyre-fixme[53]: Captured variable `exp_id` is not annotated.
-    # pyre-fixme[3]: Return type must be annotated.
-    def add_experiment_id(sqa: SQAMetric):
+    def add_experiment_id(sqa: SQAMetric) -> None:
         sqa.experiment_id = exp_id
 
     encode_func = (
@@ -425,9 +479,9 @@ def update_outcome_constraint_on_experiment(
 
 def update_properties_on_experiment(
     experiment_with_updated_properties: Experiment,
-    config: Optional[SQAConfig] = None,
+    config: SQAConfig | None = None,
 ) -> None:
-    config = config or SQAConfig()
+    config = SQAConfig() if config is None else config
     exp_sqa_class = config.class_to_sqa_class[Experiment]
 
     exp_id = experiment_with_updated_properties.db_id
@@ -442,16 +496,97 @@ def update_properties_on_experiment(
         )
 
 
+def update_properties_on_trial(
+    trial_with_updated_properties: BaseTrial,
+    config: SQAConfig | None = None,
+) -> None:
+    config = SQAConfig() if config is None else config
+    trial_sqa_class = config.class_to_sqa_class[Trial]
+
+    trial_id = trial_with_updated_properties.db_id
+    if trial_id is None:
+        raise ValueError("Trial must be saved before being updated.")
+
+    with session_scope() as session:
+        session.query(trial_sqa_class).filter_by(id=trial_id).update(
+            {
+                "properties": trial_with_updated_properties._properties,
+            }
+        )
+
+
+def update_trial_status(
+    trial_with_updated_status: BaseTrial,
+    config: SQAConfig | None = None,
+) -> None:
+    config = SQAConfig() if config is None else config
+    trial_sqa_class = config.class_to_sqa_class[Trial]
+
+    trial_id = trial_with_updated_status.db_id
+    if trial_id is None:
+        raise ValueError("Trial must be saved before being updated.")
+
+    with session_scope() as session:
+        session.query(trial_sqa_class).filter_by(id=trial_id).update(
+            {
+                "status": trial_with_updated_status.status,
+            }
+        )
+
+
+def save_analysis_cards(
+    analysis_cards: list[AnalysisCard],
+    experiment: Experiment,
+    config: SQAConfig | None = None,
+) -> None:
+    # Start up SQA encoder.
+    config = SQAConfig() if config is None else config
+    encoder = Encoder(config=config)
+    decoder = Decoder(config=config)
+    timestamp = datetime.utcnow()
+    _save_analysis_cards(
+        analysis_cards=analysis_cards,
+        experiment=experiment,
+        timestamp=timestamp,
+        encoder=encoder,
+        decoder=decoder,
+    )
+
+
+def _save_analysis_cards(
+    analysis_cards: list[AnalysisCard],
+    experiment: Experiment,
+    timestamp: datetime,
+    encoder: Encoder,
+    decoder: Decoder,
+) -> None:
+    if any(analysis_card.db_id is not None for analysis_card in analysis_cards):
+        raise ValueError("Analysis cards cannot be updated.")
+    if experiment.db_id is None:
+        raise ValueError(
+            f"Experiment {experiment.name} should be saved before analysis cards."
+        )
+    _bulk_merge_into_session(
+        objs=analysis_cards,
+        encode_func=encoder.analysis_card_to_sqa,
+        decode_func=decoder.analysis_card_from_sqa,
+        encode_args_list=[
+            {
+                "experiment_id": experiment.db_id,
+                "timestamp": timestamp,
+            }
+            for _analysis_card in analysis_cards
+        ],
+    )
+
+
 def _merge_into_session(
     obj: Base,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
     encode_func: Callable,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
     decode_func: Callable,
-    encode_args: Optional[Dict[str, Any]] = None,
-    decode_args: Optional[Dict[str, Any]] = None,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
-    modify_sqa: Optional[Callable] = None,
+    encode_args: dict[str, Any] | None = None,
+    decode_args: dict[str, Any] | None = None,
+    modify_sqa: Callable | None = None,
 ) -> SQABase:
     """Given a user-facing object (that may or may not correspond to an
     existing DB object), perform the following steps to either create or
@@ -486,16 +621,13 @@ def _merge_into_session(
 
 def _bulk_merge_into_session(
     objs: Sequence[Base],
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
     encode_func: Callable,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
     decode_func: Callable,
-    encode_args_list: Optional[Union[List[None], List[Dict[str, Any]]]] = None,
-    decode_args_list: Optional[Union[List[None], List[Dict[str, Any]]]] = None,
-    # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
-    modify_sqa: Optional[Callable] = None,
-    batch_size: Optional[int] = None,
-) -> List[SQABase]:
+    encode_args_list: list[None] | list[dict[str, Any]] | None = None,
+    decode_args_list: list[None] | list[dict[str, Any]] | None = None,
+    modify_sqa: Callable | None = None,
+    batch_size: int | None = None,
+) -> list[SQABase]:
     """Bulk version of _merge_into_session.
 
     Takes in a list of objects to merge into the session together

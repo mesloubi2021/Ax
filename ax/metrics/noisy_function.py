@@ -4,11 +4,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+from collections.abc import Callable
+
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from ax.core.base_trial import BaseTrial
 from ax.core.data import Data
@@ -25,9 +30,9 @@ class NoisyFunctionMetric(Metric):
     def __init__(
         self,
         name: str,
-        param_names: List[str],
-        noise_sd: Optional[float] = 0.0,
-        lower_is_better: Optional[bool] = None,
+        param_names: list[str],
+        noise_sd: float | None = 0.0,
+        lower_is_better: bool | None = None,
     ) -> None:
         """
         Metric is computed by evaluating a deterministic function, implemented
@@ -100,7 +105,7 @@ class NoisyFunctionMetric(Metric):
         x = np.array([params[p] for p in self.param_names])
         return self.f(x)
 
-    def f(self, x: np.ndarray) -> float:
+    def f(self, x: npt.NDArray) -> float:
         """The deterministic function that produces the metric outcomes."""
         raise NotImplementedError
 
@@ -110,8 +115,8 @@ class GenericNoisyFunctionMetric(NoisyFunctionMetric):
         self,
         name: str,
         f: Callable[[TParameterization], float],
-        noise_sd: Optional[float] = 0.0,
-        lower_is_better: Optional[bool] = None,
+        noise_sd: float | None = 0.0,
+        lower_is_better: bool | None = None,
     ) -> None:
         """
         Metric is computed by evaluating a deterministic function, implemented in f.
@@ -132,7 +137,7 @@ class GenericNoisyFunctionMetric(NoisyFunctionMetric):
         Metric.__init__(self, name=name, lower_is_better=lower_is_better)
 
     @property
-    def param_names(self) -> List[str]:
+    def param_names(self) -> list[str]:
         raise NotImplementedError(
             "GenericNoisyFunctionMetric does not implement a param_names attribute"
         )

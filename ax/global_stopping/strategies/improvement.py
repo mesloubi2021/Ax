@@ -4,8 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from logging import Logger
-from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from ax.core.base_trial import BaseTrial, TrialStatus
@@ -18,12 +19,16 @@ from ax.core.optimization_config import (
 from ax.core.outcome_constraint import ObjectiveThreshold
 from ax.core.trial import Trial
 from ax.core.types import ComparisonOp
+from ax.exceptions.core import AxError
 from ax.global_stopping.strategies.base import BaseGlobalStoppingStrategy
 from ax.modelbridge.modelbridge_utils import observed_hypervolume
-from ax.plot.pareto_utils import get_tensor_converter_model
-from ax.service.utils.best_point import fill_missing_thresholds_from_nadir
+from ax.plot.pareto_utils import (
+    get_tensor_converter_model,
+    infer_reference_point_from_experiment,
+)
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
+from pyre_extensions import none_throws
 
 
 logger: Logger = get_logger(__name__)
@@ -61,26 +66,37 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
                 The first trial that could be used for analysis is
                 `min_trials - window_size`; the first trial for which stopping
                 might be recommended is `min_trials`.
-            improvement_bar: Threshold (in [0,1]) for considering relative improvement
-                over the best point.
+            improvement_bar: Threshold for considering improvement over the best
+                point, relative to the interquartile range of values seen so
+                far. Must be >= 0.
             inactive_when_pending_trials: If set, the optimization will not stopped as
                 long as it has running trials.
         """
+        if improvement_bar < 0:
+            raise ValueError("improvement_bar must be >= 0.")
         super().__init__(
             min_trials=min_trials,
             inactive_when_pending_trials=inactive_when_pending_trials,
         )
         self.window_size = window_size
         self.improvement_bar = improvement_bar
-        self.hv_by_trial: Dict[int, float] = {}
+        self.hv_by_trial: dict[int, float] = {}
+        self._inferred_objective_thresholds: list[ObjectiveThreshold] | None = None
+
+    def __repr__(self) -> str:
+        return super().__repr__() + (
+            f" min_trials={self.min_trials} "
+            f"window_size={self.window_size} "
+            f"improvement_bar={self.improvement_bar} "
+            f"inactive_when_pending_trials={self.inactive_when_pending_trials}"
+        )
 
     def _should_stop_optimization(
         self,
         experiment: Experiment,
-        trial_to_check: Optional[int] = None,
-        objective_thresholds: Optional[List[ObjectiveThreshold]] = None,
-        **kwargs: Dict[str, Any],
-    ) -> Tuple[bool, str]:
+        trial_to_check: int | None = None,
+        objective_thresholds: list[ObjectiveThreshold] | None = None,
+    ) -> tuple[bool, str]:
         """
         Check if the objective has improved significantly in the past
         "window_size" iterations.
@@ -99,6 +115,9 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
                 when computing hv of the pareto front against. This is used only in the
                 MOO setting. If not specified, the objective thresholds on the
                 experiment's optimization config will be used for the purpose.
+                If no thresholds are provided, they are automatically inferred. They are
+                only inferred once for each instance of the strategy (i.e. inferred
+                thresholds don't update with additional data).
 
         Returns:
             A Tuple with a boolean determining whether the optimization should stop,
@@ -131,11 +150,46 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
             )
             return stop, message
 
+        data = experiment.lookup_data()
+        if data.df.empty:
+            raise AxError(
+                f"Experiment {experiment} does not have any data attached "
+                f"to it, despite having {num_completed_trials} completed "
+                f"trials. Data is required for {self}, so this is an invalid "
+                "state of the experiment."
+            )
+
         if isinstance(experiment.optimization_config, MultiObjectiveOptimizationConfig):
+            if objective_thresholds is None:
+                # self._inferred_objective_thresholds is cached and only computed once.
+                if self._inferred_objective_thresholds is None:
+                    # only infer reference point if there is data on the experiment.
+                    if not data.df.empty:
+                        # We infer the nadir reference point to be used by the GSS.
+                        self._inferred_objective_thresholds = (
+                            infer_reference_point_from_experiment(
+                                experiment=experiment, data=data
+                            )
+                        )
+                # TODO: move this out into a separate infer_objective_thresholds
+                # instance method or property that handles the caching.
+                objective_thresholds = self._inferred_objective_thresholds
+            if not objective_thresholds:
+                # TODO: This is headed to ax.modelbridge.modelbridge_utils.hypervolume,
+                # where an empty list would lead to an opaque indexing error.
+                # A list that is nonempty and of the wrong length could be worse,
+                # since it might wind up running without error, but with thresholds for
+                # the wrong metrics. We should validate correctness of the length of the
+                # objective thresholds, ideally in hypervolume utils.
+                raise AxError(
+                    f"Objective thresholds were not specified and could not be inferred"
+                    f". They are required for {self} when performing multi-objective "
+                    "optimization, so this is an invalid state of the experiment."
+                )
             return self._should_stop_moo(
                 experiment=experiment,
                 trial_to_check=trial_to_check,
-                objective_thresholds=objective_thresholds,
+                objective_thresholds=none_throws(objective_thresholds),
             )
         else:
             return self._should_stop_single_objective(
@@ -146,8 +200,8 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
         self,
         experiment: Experiment,
         trial_to_check: int,
-        objective_thresholds: Optional[List[ObjectiveThreshold]] = None,
-    ) -> Tuple[bool, str]:
+        objective_thresholds: list[ObjectiveThreshold],
+    ) -> tuple[bool, str]:
         """
         This is the "should_stop_optimization" method of this class, specialized
         to MOO experiments.
@@ -176,16 +230,9 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
                 and a str declaring the reason for stopping.
         """
         reference_trial_index = trial_to_check - self.window_size + 1
-        data_df = experiment.fetch_data().df
+        data_df = experiment.lookup_data().df
         data_df_reference = data_df[data_df["trial_index"] <= reference_trial_index]
         data_df = data_df[data_df["trial_index"] <= trial_to_check]
-
-        optimization_config = checked_cast(
-            MultiObjectiveOptimizationConfig, experiment.optimization_config
-        ).clone_with_args(objective_thresholds=objective_thresholds)
-        objective_thresholds = fill_missing_thresholds_from_nadir(
-            experiment=experiment, optimization_config=optimization_config
-        )
 
         # Computing or retrieving HV at "window_size" iteration before
         if reference_trial_index in self.hv_by_trial:
@@ -224,7 +271,7 @@ class ImprovementGlobalStoppingStrategy(BaseGlobalStoppingStrategy):
 
     def _should_stop_single_objective(
         self, experiment: Experiment, trial_to_check: int
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         This is the `_should_stop_optimization` method of this class,
         specialized to single-objective experiments.
@@ -301,7 +348,7 @@ def constraint_satisfaction(trial: BaseTrial) -> bool:
     Returns:
         A boolean which is True iff all outcome constraints are satisfied.
     """
-    outcome_constraints = not_none(
+    outcome_constraints = none_throws(
         trial.experiment.optimization_config
     ).outcome_constraints
     if len(outcome_constraints) == 0:

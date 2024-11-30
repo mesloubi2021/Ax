@@ -8,12 +8,12 @@
 
 import hashlib
 import json
-from typing import Optional
+from collections.abc import Mapping
 
-from ax.core.types import TParameterization
+from ax.core.types import TParameterization, TParamValue
 from ax.utils.common.base import SortableBase
 from ax.utils.common.equality import equality_typechecker
-from ax.utils.common.typeutils import numpy_type_to_python_type
+from ax.utils.common.typeutils_nonnative import numpy_type_to_python_type
 
 
 class Arm(SortableBase):
@@ -23,9 +23,7 @@ class Arm(SortableBase):
     encapsulates the parametrization needed by the unit.
     """
 
-    def __init__(
-        self, parameters: TParameterization, name: Optional[str] = None
-    ) -> None:
+    def __init__(self, parameters: TParameterization, name: str | None = None) -> None:
         """Inits Arm.
 
         Args:
@@ -39,7 +37,7 @@ class Arm(SortableBase):
     def parameters(self) -> TParameterization:
         """Get mapping from parameter names to values."""
         # Make a copy before returning so it cannot be accidentally mutated
-        return dict(self._parameters)
+        return self._parameters.copy()
 
     @property
     def has_name(self) -> bool:
@@ -76,7 +74,7 @@ class Arm(SortableBase):
         return self.md5hash(self.parameters)
 
     @staticmethod
-    def md5hash(parameters: TParameterization) -> str:
+    def md5hash(parameters: Mapping[str, TParamValue]) -> str:
         """Return unique identifier for arm's parameters.
 
         Args:
@@ -87,8 +85,9 @@ class Arm(SortableBase):
             Hash of arm's parameters.
 
         """
+        new_parameters = {}
         for k, v in parameters.items():
-            parameters[k] = numpy_type_to_python_type(v)
+            new_parameters[k] = numpy_type_to_python_type(v)
         parameters_str = json.dumps(parameters, sort_keys=True)
         return hashlib.md5(parameters_str.encode("utf-8")).hexdigest()
 

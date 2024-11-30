@@ -4,14 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from ax.core.arm import Arm
 from ax.utils.common.testutils import TestCase
 
 
 class ArmTest(TestCase):
-    def setUp(self) -> None:
-        pass
-
     def test_Init(self) -> None:
         arm = Arm(parameters={"y": 0.25, "x": 0.75, "z": 75})
         self.assertEqual(str(arm), "Arm(parameters={'y': 0.25, 'x': 0.75, 'z': 75})")

@@ -4,10 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Dict, List, Union
 
 from ax.utils.common.base import SortableBase
 from ax.utils.common.equality import equality_typechecker
@@ -28,7 +29,7 @@ class RiskMeasure(SortableBase):
     def __init__(
         self,
         risk_measure: str,
-        options: Dict[str, Union[int, float, bool, List[float]]],
+        options: dict[str, int | float | bool | list[float]],
     ) -> None:
         """Initialize a risk measure.
 

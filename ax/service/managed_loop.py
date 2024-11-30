@@ -4,11 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 import inspect
 import logging
-from typing import Iterable, List, Optional, Tuple
+from collections.abc import Iterable
 
 from ax.core.arm import Arm
 from ax.core.base_trial import BaseTrial
@@ -22,21 +24,25 @@ from ax.core.types import (
     TModelPredictArm,
     TParameterization,
 )
+from ax.core.utils import get_pending_observation_features
 from ax.exceptions.constants import CHOLESKY_ERROR_ANNOTATION
 from ax.exceptions.core import SearchSpaceExhausted, UserInputError
 from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.dispatch_utils import choose_generation_strategy
 from ax.modelbridge.generation_strategy import GenerationStrategy
-from ax.modelbridge.modelbridge_utils import get_pending_observation_features
 from ax.modelbridge.registry import Models
 from ax.service.utils.best_point import (
     get_best_parameters_from_model_predictions,
     get_best_raw_objective_point,
 )
-from ax.service.utils.instantiation import InstantiationBase, TParameterRepresentation
+from ax.service.utils.instantiation import (
+    DEFAULT_OBJECTIVE_NAME,
+    InstantiationBase,
+    TParameterRepresentation,
+)
 from ax.utils.common.executils import retry_on_exception
 from ax.utils.common.logger import get_logger
-from ax.utils.common.typeutils import not_none
+from pyre_extensions import none_throws
 
 
 logger: logging.Logger = get_logger(__name__)
@@ -52,10 +58,10 @@ class OptimizationLoop:
         evaluation_function: TEvaluationFunction,
         total_trials: int = 20,
         arms_per_trial: int = 1,
-        random_seed: Optional[int] = None,
+        random_seed: int | None = None,
         wait_time: int = 0,
         run_async: bool = False,  # TODO[Lena],
-        generation_strategy: Optional[GenerationStrategy] = None,
+        generation_strategy: GenerationStrategy | None = None,
     ) -> None:
         assert not run_async, "OptimizationLoop does not yet support async."
         self.wait_time = wait_time
@@ -82,26 +88,27 @@ class OptimizationLoop:
 
     @staticmethod
     def with_evaluation_function(
-        parameters: List[TParameterRepresentation],
+        parameters: list[TParameterRepresentation],
         evaluation_function: TEvaluationFunction,
-        experiment_name: Optional[str] = None,
-        objective_name: Optional[str] = None,
+        experiment_name: str | None = None,
+        objective_name: str | None = None,
         minimize: bool = False,
-        parameter_constraints: Optional[List[str]] = None,
-        outcome_constraints: Optional[List[str]] = None,
+        parameter_constraints: list[str] | None = None,
+        outcome_constraints: list[str] | None = None,
         total_trials: int = 20,
         arms_per_trial: int = 1,
         wait_time: int = 0,
-        random_seed: Optional[int] = None,
-        generation_strategy: Optional[GenerationStrategy] = None,
-    ) -> "OptimizationLoop":
+        random_seed: int | None = None,
+        generation_strategy: GenerationStrategy | None = None,
+    ) -> OptimizationLoop:
         """Constructs a synchronous `OptimizationLoop` using an evaluation
         function."""
+        if objective_name is None:
+            objective_name = DEFAULT_OBJECTIVE_NAME
         experiment = InstantiationBase.make_experiment(
             name=experiment_name,
             parameters=parameters,
-            objective_name=objective_name,
-            minimize=minimize,
+            objectives={objective_name: "minimize" if minimize else "maximize"},
             parameter_constraints=parameter_constraints,
             outcome_constraints=outcome_constraints,
         )
@@ -118,26 +125,26 @@ class OptimizationLoop:
     @classmethod
     def with_runners_and_metrics(
         cls,
-        parameters: List[TParameterRepresentation],
+        parameters: list[TParameterRepresentation],
         path_to_runner: str,
-        paths_to_metrics: List[str],
-        experiment_name: Optional[str] = None,
-        objective_name: Optional[str] = None,
+        paths_to_metrics: list[str],
+        experiment_name: str | None = None,
+        objective_name: str | None = None,
         minimize: bool = False,
-        parameter_constraints: Optional[List[str]] = None,
-        outcome_constraints: Optional[List[str]] = None,
+        parameter_constraints: list[str] | None = None,
+        outcome_constraints: list[str] | None = None,
         total_trials: int = 20,
         arms_per_trial: int = 1,
         wait_time: int = 0,
-        random_seed: Optional[int] = None,
-    ) -> "OptimizationLoop":
+        random_seed: int | None = None,
+    ) -> OptimizationLoop:
         """Constructs an asynchronous `OptimizationLoop` using Ax runners and
         metrics."""
         # NOTE: Could use `Scheduler` to implement this if needed.
         raise NotImplementedError
 
     def _call_evaluation_function(
-        self, parameterization: TParameterization, weight: Optional[float] = None
+        self, parameterization: TParameterization, weight: float | None = None
     ) -> TEvaluationOutcome:
         signature = inspect.signature(self.evaluation_function)
         num_evaluation_function_params = len(signature.parameters.items())
@@ -178,10 +185,10 @@ class OptimizationLoop:
 
     def _get_weights_by_arm(
         self, trial: BaseTrial
-    ) -> Iterable[Tuple[Arm, Optional[float]]]:
+    ) -> Iterable[tuple[Arm, float | None]]:
         if isinstance(trial, Trial):
             if trial.arm is not None:
-                return [(not_none(trial.arm), None)]
+                return [(none_throws(trial.arm), None)]
             return []
         elif isinstance(trial, BatchTrial):
             return trial.normalized_arm_weights().items()
@@ -211,7 +218,7 @@ class OptimizationLoop:
             trial_index=self.current_trial,
             sample_sizes={},
             data_type=self.experiment.default_data_type,
-            metric_names=not_none(
+            metric_names=none_throws(
                 self.experiment.optimization_config
             ).objective.metric_names,
         )
@@ -239,7 +246,7 @@ class OptimizationLoop:
                 return self
         return self
 
-    def get_best_point(self) -> Tuple[TParameterization, Optional[TModelPredictArm]]:
+    def get_best_point(self) -> tuple[TParameterization, TModelPredictArm | None]:
         """Obtains the best point encountered in the course
         of this optimization."""
         # Find latest trial which has a generator_run attached and get its predictions
@@ -262,26 +269,24 @@ class OptimizationLoop:
             ),
         )
 
-    def get_current_model(self) -> Optional[ModelBridge]:
+    def get_current_model(self) -> ModelBridge | None:
         """Obtain the most recently used model in optimization."""
         return self.generation_strategy.model
 
 
 def optimize(
-    parameters: List[TParameterRepresentation],
+    parameters: list[TParameterRepresentation],
     evaluation_function: TEvaluationFunction,
-    experiment_name: Optional[str] = None,
-    objective_name: Optional[str] = None,
+    experiment_name: str | None = None,
+    objective_name: str | None = None,
     minimize: bool = False,
-    parameter_constraints: Optional[List[str]] = None,
-    outcome_constraints: Optional[List[str]] = None,
+    parameter_constraints: list[str] | None = None,
+    outcome_constraints: list[str] | None = None,
     total_trials: int = 20,
     arms_per_trial: int = 1,
-    random_seed: Optional[int] = None,
-    generation_strategy: Optional[GenerationStrategy] = None,
-) -> Tuple[
-    TParameterization, Optional[TModelPredictArm], Experiment, Optional[ModelBridge]
-]:
+    random_seed: int | None = None,
+    generation_strategy: GenerationStrategy | None = None,
+) -> tuple[TParameterization, TModelPredictArm | None, Experiment, ModelBridge | None]:
     """Construct and run a full optimization loop."""
     loop = OptimizationLoop.with_evaluation_function(
         parameters=parameters,

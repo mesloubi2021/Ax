@@ -4,36 +4,41 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
+import pandas as pd
 import plotly.graph_objs as go
 from ax.core.experiment import Experiment
 from ax.plot.base import AxPlotConfig, AxPlotTypes
 from ax.plot.color import COLORS, DISCRETE_COLOR_SCALE, rgba
 from ax.utils.common.timeutils import timestamps_in_range
-from ax.utils.common.typeutils import not_none
+from plotly import express as px
 from plotly.express.colors import sample_colorscale
+from pyre_extensions import none_throws
 
 FIVE_MINUTES = timedelta(minutes=5)
 
 
 # type aliases
-Traces = List[Dict[str, Any]]
+Traces = list[dict[str, Any]]
 
 
 def map_data_single_trace_scatters(
-    x: np.ndarray,
-    y: np.ndarray,
+    x: npt.NDArray,
+    y: npt.NDArray,
     legend_label: str,
     xlabel: str = "Trial progression",
     ylabel: str = "Trial performance",
     plot_stopping_marker: bool = False,
     opacity: float = 0.5,
-    trace_color: Tuple[int] = COLORS.STEELBLUE.value,
+    trace_color: tuple[int] = COLORS.STEELBLUE.value,
     visible: bool = True,
-) -> List[go.Scatter]:
+) -> list[go.Scatter]:
     """Plot a single trial's trace from map data.
 
     Args:
@@ -92,13 +97,13 @@ def map_data_single_trace_scatters(
 
 def map_data_multiple_metrics_dropdown_plotly(
     title: str,
-    metric_names: List[str],
-    xs_by_metric: Dict[str, List[np.ndarray]],
-    ys_by_metric: Dict[str, List[np.ndarray]],
-    legend_labels_by_metric: Dict[str, List[str]],
-    stopping_markers_by_metric: Dict[str, List[bool]],
-    xlabels_by_metric: Dict[str, str],
-    lower_is_better_by_metric: Dict[str, Optional[bool]],
+    metric_names: list[str],
+    xs_by_metric: dict[str, list[npt.NDArray]],
+    ys_by_metric: dict[str, list[npt.NDArray]],
+    legend_labels_by_metric: dict[str, list[str]],
+    stopping_markers_by_metric: dict[str, list[bool]],
+    xlabels_by_metric: dict[str, str],
+    lower_is_better_by_metric: dict[str, bool | None],
     opacity: float = 0.75,
     color_map: str = "viridis",
     autoset_axis_limits: bool = True,
@@ -205,10 +210,10 @@ def map_data_multiple_metrics_dropdown_plotly(
 
 
 def mean_trace_scatter(
-    y: np.ndarray,
-    trace_color: Tuple[int] = COLORS.STEELBLUE.value,
+    y: npt.NDArray,
+    trace_color: tuple[int] = COLORS.STEELBLUE.value,
     legend_label: str = "mean",
-    hover_labels: Optional[List[str]] = None,
+    hover_labels: list[str] | None = None,
 ) -> go.Scatter:
     """Creates a graph object for trace of the mean of the given series across
     runs.
@@ -238,10 +243,10 @@ def mean_trace_scatter(
 
 
 def sem_range_scatter(
-    y: np.ndarray,
-    trace_color: Tuple[int] = COLORS.STEELBLUE.value,
+    y: npt.NDArray,
+    trace_color: tuple[int] = COLORS.STEELBLUE.value,
     legend_label: str = "",
-) -> Tuple[go.Scatter, go.Scatter]:
+) -> tuple[go.Scatter, go.Scatter]:
     """Creates a graph object for trace of mean +/- 2 SEMs for y, across runs.
 
     Args:
@@ -254,6 +259,7 @@ def sem_range_scatter(
         Tuple[go.Scatter]: plotly graph objects for lower and upper bounds
     """
     mean = np.mean(y, axis=0)
+    y[np.isinf(y)] = np.nan  # avoids RuntimeWarning in np.std due to invalid values
     sem = np.std(y, axis=0) / np.sqrt(y.shape[0])
     return (
         go.Scatter(
@@ -280,10 +286,10 @@ def sem_range_scatter(
 
 
 def mean_markers_scatter(
-    y: np.ndarray,
-    marker_color: Tuple[int] = COLORS.LIGHT_PURPLE.value,
+    y: npt.NDArray,
+    marker_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     legend_label: str = "",
-    hover_labels: Optional[List[str]] = None,
+    hover_labels: list[str] | None = None,
 ) -> go.Scatter:
     """Creates a graph object for trace of the mean of the given series across
     runs, with errorbars.
@@ -317,7 +323,7 @@ def mean_markers_scatter(
 
 
 def optimum_objective_scatter(
-    optimum: float, num_iterations: int, optimum_color: Tuple[int] = COLORS.ORANGE.value
+    optimum: float, num_iterations: int, optimum_color: tuple[int] = COLORS.ORANGE.value
 ) -> go.Scatter:
     """Creates a graph object for the line representing optimal objective.
 
@@ -340,53 +346,19 @@ def optimum_objective_scatter(
     )
 
 
-def model_transitions_scatter(
-    model_transitions: List[int],
-    y_range: List[float],
-    generator_change_color: Tuple[int] = COLORS.TEAL.value,
-) -> List[go.Scatter]:
-    """Creates a graph object for the line(s) representing generator changes.
-
-    Args:
-        model_transitions: iterations, before which generators
-            changed
-        y_range: upper and lower values of the y-range of the plot
-        generator_change_color: tuple of 3 int values representing
-            an RGB color. Defaults to orange.
-
-    Returns:
-        go.Scatter: plotly graph objects for the lines representing generator
-            changes
-    """
-    if len(y_range) != 2:
-        raise ValueError("y_range should have two values, lower and upper.")
-    data: List[go.Scatter] = []
-    for change in model_transitions:
-        data.append(
-            go.Scatter(
-                x=[change] * 2,
-                y=y_range,
-                mode="lines",
-                line={"dash": "dash", "color": rgba(generator_change_color)},
-                name="model change",
-            )
-        )
-    return data
-
-
 def optimization_trace_single_method_plotly(
-    y: np.ndarray,
-    optimum: Optional[float] = None,
-    model_transitions: Optional[List[int]] = None,
+    y: npt.NDArray,
+    optimum: float | None = None,
+    model_transitions: list[int] | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[List[str]] = None,
-    trace_color: Tuple[int] = COLORS.STEELBLUE.value,
-    optimum_color: Tuple[int] = COLORS.ORANGE.value,
-    generator_change_color: Tuple[int] = COLORS.TEAL.value,
-    optimization_direction: Optional[str] = "passthrough",
+    hover_labels: list[str] | None = None,
+    trace_color: tuple[int] = COLORS.STEELBLUE.value,
+    optimum_color: tuple[int] = COLORS.ORANGE.value,
+    generator_change_color: tuple[int] = COLORS.TEAL.value,
+    optimization_direction: str | None = "passthrough",
     plot_trial_points: bool = False,
-    trial_points_color: Tuple[int] = COLORS.LIGHT_PURPLE.value,
+    trial_points_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     autoset_axis_limits: bool = True,
 ) -> go.Figure:
     """Plots an optimization trace with mean and 2 SEMs
@@ -463,25 +435,6 @@ def optimization_trace_single_method_plotly(
             )
         )
 
-    if model_transitions is not None:
-        if plot_trial_points:
-            y_lower = np.percentile(y, 25, axis=0).min()
-            y_upper = np.percentile(y, 75, axis=0).max()
-        else:
-            y_lower = np.percentile(y_running_optimum, 25, axis=0).min()
-            y_upper = np.percentile(y_running_optimum, 75, axis=0).max()
-        if optimum is not None and optimum < y_lower:
-            y_lower = optimum
-        if optimum is not None and optimum > y_upper:
-            y_upper = optimum
-        data.extend(
-            model_transitions_scatter(
-                model_transitions=model_transitions,
-                y_range=[y_lower, y_upper],
-                generator_change_color=generator_change_color,
-            )
-        )
-
     layout = go.Layout(
         title=title,
         showlegend=True,
@@ -496,35 +449,51 @@ def optimization_trace_single_method_plotly(
     return go.Figure(layout=layout, data=data, layout_yaxis_range=layout_yaxis_range)
 
 
-def _autoset_axis_limits(y: np.ndarray, optimization_direction: str) -> List[float]:
-    q1 = np.percentile(y, q=25, interpolation="lower").min()
-    q2_min = np.percentile(y, q=50, interpolation="linear").min()
-    q2_max = np.percentile(y, q=50, interpolation="linear").max()
-    q3 = np.percentile(y, q=75, interpolation="higher").max()
+def _autoset_axis_limits(
+    y: npt.NDArray,
+    optimization_direction: str,
+    force_include_value: float | None = None,
+) -> list[float]:
+    """Provides automatic axis limits based on the data and optimization direction.
+    All best points are included in this range, and by default the worst points are
+    truncated at some distance below the median, where that distance is given by
+    1.5 * (the distance between the median and the best quartile).
+
+    If `force_include_value` is provided, the worst points will be truncated at this
+    value if it is worse than the truncation point described above.
+    """
+    q1 = np.percentile(y, q=25, method="lower").min()
+    q2_min = np.percentile(y, q=50, method="linear").min()
+    q2_max = np.percentile(y, q=50, method="linear").max()
+    q3 = np.percentile(y, q=75, method="higher").max()
     if optimization_direction == "minimize":
         y_lower = y.min()
         y_upper = q2_max + 1.5 * (q2_max - q1)
+        if force_include_value is not None:
+            y_upper = max(y_upper, force_include_value)
     else:
         y_lower = q2_min - 1.5 * (q3 - q2_min)
         y_upper = y.max()
+        if force_include_value is not None:
+            y_lower = min(y_lower, force_include_value)
     y_padding = 0.1 * (y_upper - y_lower)
     y_lower, y_upper = y_lower - y_padding, y_upper + y_padding
     return [y_lower, y_upper]
 
 
 def optimization_trace_single_method(
-    y: np.ndarray,
-    optimum: Optional[float] = None,
-    model_transitions: Optional[List[int]] = None,
+    y: npt.NDArray,
+    optimum: float | None = None,
+    model_transitions: list[int] | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[List[str]] = None,
-    trace_color: Tuple[int] = COLORS.STEELBLUE.value,
-    optimum_color: Tuple[int] = COLORS.ORANGE.value,
-    generator_change_color: Tuple[int] = COLORS.TEAL.value,
-    optimization_direction: Optional[str] = "passthrough",
+    hover_labels: list[str] | None = None,
+    trace_color: tuple[int] = COLORS.STEELBLUE.value,
+    optimum_color: tuple[int] = COLORS.ORANGE.value,
+    generator_change_color: tuple[int] = COLORS.TEAL.value,
+    optimization_direction: str | None = "passthrough",
     plot_trial_points: bool = False,
-    trial_points_color: Tuple[int] = COLORS.LIGHT_PURPLE.value,
+    trial_points_color: tuple[int] = COLORS.LIGHT_PURPLE.value,
     autoset_axis_limits: bool = True,
 ) -> AxPlotConfig:
     """Plots an optimization trace with mean and 2 SEMs
@@ -558,6 +527,8 @@ def optimization_trace_single_method(
         AxPlotConfig: plot of the optimization trace with IQR
     """
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=optimization_trace_single_method_plotly(
             y=y,
             optimum=optimum,
@@ -578,13 +549,13 @@ def optimization_trace_single_method(
 
 
 def optimization_trace_all_methods(
-    y_dict: Dict[str, np.ndarray],
-    optimum: Optional[float] = None,
+    y_dict: dict[str, npt.NDArray],
+    optimum: float | None = None,
     title: str = "",
     ylabel: str = "",
-    hover_labels: Optional[List[str]] = None,
-    trace_colors: List[Tuple[int]] = DISCRETE_COLOR_SCALE,
-    optimum_color: Tuple[int] = COLORS.ORANGE.value,
+    hover_labels: list[str] | None = None,
+    trace_colors: list[tuple[int]] = DISCRETE_COLOR_SCALE,
+    optimum_color: tuple[int] = COLORS.ORANGE.value,
 ) -> AxPlotConfig:
     """Plots a comparison of optimization traces with 2-SEM bands for multiple
     methods on the same problem.
@@ -606,7 +577,7 @@ def optimization_trace_all_methods(
     Returns:
         AxPlotConfig: plot of the comparison of optimization traces with IQR
     """
-    data: List[go.Scatter] = []
+    data: list[go.Scatter] = []
 
     for i, (method, y) in enumerate(y_dict.items()):
         # If there are more traces than colors, start reusing colors.
@@ -634,13 +605,16 @@ def optimization_trace_all_methods(
     )
 
     return AxPlotConfig(
-        data=go.Figure(layout=layout, data=data), plot_type=AxPlotTypes.GENERIC
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
+        data=go.Figure(layout=layout, data=data),
+        plot_type=AxPlotTypes.GENERIC,
     )
 
 
 def optimization_times(
-    fit_times: Dict[str, List[float]],
-    gen_times: Dict[str, List[float]],
+    fit_times: dict[str, list[float]],
+    gen_times: dict[str, list[float]],
     title: str = "",
 ) -> AxPlotConfig:
     """Plots wall times for each method as a bar chart.
@@ -654,30 +628,38 @@ def optimization_times(
     """
     # Compute means and SEs
     methods = list(fit_times.keys())
-    fit_res: Dict[str, Union[str, List[float]]] = {"name": "Fitting"}
+    fit_res: dict[str, str | list[float]] = {"name": "Fitting"}
     fit_res["mean"] = [np.mean(fit_times[m]) for m in methods]
     fit_res["2sems"] = [
-        2 * np.std(fit_times[m]) / np.sqrt(len(fit_times[m])) for m in methods
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
+        2 * np.std(fit_times[m]) / np.sqrt(len(fit_times[m]))
+        for m in methods
     ]
-    gen_res: Dict[str, Union[str, List[float]]] = {"name": "Generation"}
+    gen_res: dict[str, str | list[float]] = {"name": "Generation"}
     gen_res["mean"] = [np.mean(gen_times[m]) for m in methods]
     gen_res["2sems"] = [
-        2 * np.std(gen_times[m]) / np.sqrt(len(gen_times[m])) for m in methods
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
+        2 * np.std(gen_times[m]) / np.sqrt(len(gen_times[m]))
+        for m in methods
     ]
-    total_mean: List[float] = []
-    total_2sems: List[float] = []
+    total_mean: list[float] = []
+    total_2sems: list[float] = []
     for m in methods:
         totals = np.array(fit_times[m]) + np.array(gen_times[m])
         total_mean.append(np.mean(totals))
+        # pyre-fixme[58]: `*` is not supported for operand types `int` and
+        #  `floating[typing.Any]`.
         total_2sems.append(2 * np.std(totals) / np.sqrt(len(totals)))
-    total_res: Dict[str, Union[str, List[float]]] = {
+    total_res: dict[str, str | list[float]] = {
         "name": "Total",
         "mean": total_mean,
         "2sems": total_2sems,
     }
 
     # Construct plot
-    data: List[go.Bar] = []
+    data: list[go.Bar] = []
 
     for i, res in enumerate([fit_res, gen_res, total_res]):
         data.append(
@@ -704,7 +686,10 @@ def optimization_times(
     )
 
     return AxPlotConfig(
-        data=go.Figure(layout=layout, data=data), plot_type=AxPlotTypes.GENERIC
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
+        data=go.Figure(layout=layout, data=data),
+        plot_type=AxPlotTypes.GENERIC,
     )
 
 
@@ -712,10 +697,10 @@ def get_running_trials_per_minute(
     experiment: Experiment,
     show_until_latest_end_plus_timedelta: timedelta = FIVE_MINUTES,
 ) -> AxPlotConfig:
-    trial_runtimes: List[Tuple[int, datetime, Optional[datetime]]] = [
+    trial_runtimes: list[tuple[int, datetime, datetime | None]] = [
         (
             trial.index,
-            not_none(trial._time_run_started),
+            none_throws(trial._time_run_started),
             trial._time_completed,  # Time trial was completed, failed, or abandoned.
         )
         for trial in experiment.trials.values()
@@ -723,7 +708,7 @@ def get_running_trials_per_minute(
     ]
 
     earliest_start = min(tr[1] for tr in trial_runtimes)
-    latest_end = max(not_none(tr[2]) for tr in trial_runtimes if tr[2] is not None)
+    latest_end = max(none_throws(tr[2]) for tr in trial_runtimes if tr[2] is not None)
 
     running_during = {
         ts: [
@@ -732,7 +717,7 @@ def get_running_trials_per_minute(
             # Trial is running during a given timestamp if:
             # 1) it's run start time is at/before the timestamp,
             # 2) it's completion time has not yet come or is after the timestamp.
-            if t[1] <= ts and (True if t[2] is None else not_none(t[2]) >= ts)
+            if t[1] <= ts and (True if t[2] is None else none_throws(t[2]) >= ts)
         ]
         for ts in timestamps_in_range(
             earliest_start,
@@ -749,9 +734,145 @@ def get_running_trials_per_minute(
     )
 
     return AxPlotConfig(
+        # pyre-fixme[6]: For 1st argument expected `Dict[str, typing.Any]` but got
+        #  `Figure`.
         data=go.Figure(
             layout=go.Layout(title="Number of running trials during experiment"),
             data=[scatter],
         ),
         plot_type=AxPlotTypes.GENERIC,
     )
+
+
+def plot_objective_value_vs_trial_index(
+    exp_df: pd.DataFrame,
+    metric_colname: str,
+    minimize: bool,
+    title: str | None = None,
+    hover_data_colnames: list[str] | None = None,
+    autoset_axis_limits: bool = True,
+) -> go.Figure:
+    """Returns a plotly figure showing the optimization trace for a single metric.
+
+    Args:
+        exp_df: DataFrame with the following columns
+            - "trial_index": Index of each trial.
+            - "arm_name": Name of each arm evaluated in the corresponding trial.
+            - metric_colname: Name of the objective metric (user-provided).
+            - "is_feasible": Whether each arm is feasible (optional). If not
+                provided, all arms will be considered feasible.
+            - "generation_method": Generation method used to generate each arm
+                (optional).
+            - hover_data_colnames: Columns to be displayed on hover (user-provided).
+        metric_colname: Name of the column in exp_df that contains the
+            objective metric values.
+        minimize: Optimization direction of the objective.
+        title: Title of the plot (optional).
+        hover_data_colnames: Names of additional columns to display on hover.
+        autoset_axis_limits: Automatically try to set the limit for each axis to focus
+            on the region of interest. Will always include first point.
+    Returns:
+        Optimization trace as a plot.
+    """
+    # Protect input exp_df from changes.
+    exp_df = exp_df.copy()
+
+    # Use completed trials only.
+    trial_status_colname = "trial_status"
+    if trial_status_colname in exp_df.columns:
+        exp_df = exp_df.loc[exp_df[trial_status_colname].str.match("COMPLETED")]
+
+    # Check if feasibility and generation method columns exist.
+    is_feasible_colname = "is_feasible" if "is_feasible" in exp_df.columns else None
+    generation_method_colname = (
+        "generation_method" if "generation_method" in exp_df.columns else None
+    )
+
+    scatter = px.scatter(
+        data_frame=exp_df,
+        x="trial_index",
+        y=metric_colname,
+        color=is_feasible_colname,
+        symbol=generation_method_colname,
+        hover_name="arm_name",
+        hover_data=hover_data_colnames,
+    )
+    running_feasible_optimum_df = compute_running_feasible_optimum_df(
+        exp_df=exp_df,
+        metric_colname=metric_colname,
+        minimize=minimize,
+        is_feasible_colname=is_feasible_colname,
+    )
+    line = px.line(
+        data_frame=running_feasible_optimum_df,
+        x="trial_index",
+        y="running_optimum",
+        color="Legend",
+        line_shape="hv",
+    )
+    fig = scatter.add_trace(line.data[0])
+    if autoset_axis_limits:
+        layout_yaxis_range = _autoset_axis_limits(
+            y=exp_df[metric_colname].to_numpy(),
+            optimization_direction="minimize" if minimize else "maximize",
+            force_include_value=running_feasible_optimum_df.loc[0, metric_colname],
+        )
+        fig.update_layout(yaxis_range=layout_yaxis_range)
+    if title is not None:
+        fig.update_layout(title=title)
+    return fig
+
+
+def compute_running_feasible_optimum_df(
+    exp_df: pd.DataFrame,
+    metric_colname: str,
+    minimize: bool,
+    is_feasible_colname: str | None,
+) -> pd.DataFrame:
+    """Computes the running feasible optimum for a given metric."""
+    # If feasibility column is not provided, assume all arms are feasible.
+    if is_feasible_colname is None:
+        running_feasible_optimum_df = exp_df
+    else:
+        running_feasible_optimum_df = exp_df[
+            exp_df["is_feasible"].notnull() & exp_df["is_feasible"]
+        ]
+    running_feasible_optimum_df = running_feasible_optimum_df[
+        ["trial_index", metric_colname]
+    ].copy()
+
+    # Compute running optimum.
+    if minimize:
+        running_feasible_optimum_df = (
+            running_feasible_optimum_df.groupby("trial_index").min().reset_index()
+        )
+        running_feasible_optimum_df["running_optimum"] = running_feasible_optimum_df[
+            metric_colname
+        ].cummin()
+    else:
+        running_feasible_optimum_df = (
+            running_feasible_optimum_df.groupby("trial_index").max().reset_index()
+        )
+        running_feasible_optimum_df["running_optimum"] = running_feasible_optimum_df[
+            metric_colname
+        ].cummax()
+
+    # Infill missing/infeasible trials.
+    available_trial_indices = exp_df[exp_df[metric_colname].notnull()]["trial_index"]
+    new_index = pd.Index(
+        np.arange(
+            start=available_trial_indices.min(),
+            stop=available_trial_indices.max() + 1,
+        ),
+        name="trial_index",
+    )
+    running_feasible_optimum_df = (
+        running_feasible_optimum_df.set_index("trial_index")
+        .reindex(new_index)
+        .reset_index()
+        .fillna(method="ffill")
+    )
+
+    # Add legend column.
+    running_feasible_optimum_df["Legend"] = "Running optimum"
+    return running_feasible_optimum_df

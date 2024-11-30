@@ -3,11 +3,15 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Callable, List, Optional, Union
+from functools import partial
+from typing import Any
 
 import torch
-from ax.utils.common.typeutils import checked_cast, not_none
+from ax.utils.common.typeutils import checked_cast
 from ax.utils.sensitivity.derivative_gp import posterior_derivative
 from botorch.models.model import Model
 from botorch.posteriors.gpytorch import GPyTorchPosterior
@@ -16,25 +20,54 @@ from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.utils.transforms import unnormalize
 from gpytorch.distributions import MultivariateNormal
+from pyre_extensions import none_throws
 
 
-class GpDGSMGpMean(object):
+def sample_discrete_parameters(
+    input_mc_samples: torch.Tensor,
+    discrete_features: None | list[int],
+    bounds: torch.Tensor,
+    num_mc_samples: int,
+) -> torch.Tensor:
+    r"""Samples the input parameters uniformly at random for the discrete features.
 
-    mean_gradients: Optional[torch.Tensor] = None
-    bootstrap_indices: Optional[torch.Tensor] = None
-    mean_gradients_btsp: Optional[List[torch.Tensor]] = None
+    Args:
+        input_mc_samples: The input mc samples tensor to be modified.
+        discrete_features: A list of integers (or None) of indices corresponding
+            to discrete features.
+        bounds: The parameter bounds.
+        num_mc_samples: The number of Monte Carlo grid samples.
+
+    Returns:
+        A modified input mc samples tensor.
+    """
+    if discrete_features is None:
+        return input_mc_samples
+    all_low = bounds[0, discrete_features].to(dtype=torch.int).tolist()
+    all_high = (bounds[1, discrete_features]).to(dtype=torch.int).tolist()
+    for i, low, high in zip(discrete_features, all_low, all_high):
+        randint = partial(torch.randint, low=low, high=high + 1)
+        input_mc_samples[:, i] = randint(size=torch.Size([num_mc_samples]))
+    return input_mc_samples
+
+
+class GpDGSMGpMean:
+    mean_gradients: torch.Tensor | None = None
+    bootstrap_indices: torch.Tensor | None = None
+    mean_gradients_btsp: list[torch.Tensor] | None = None
 
     def __init__(
         self,
         model: Model,
         bounds: torch.Tensor,
         derivative_gp: bool = False,
-        kernel_type: Optional[str] = None,
+        kernel_type: str | None = None,
         Y_scale: float = 1.0,
         num_mc_samples: int = 10**4,
         input_qmc: bool = False,
         dtype: torch.dtype = torch.double,
         num_bootstrap_samples: int = 1,
+        discrete_features: list[int] | None = None,
     ) -> None:
         r"""Computes three types of derivative based measures:
         the gradient, the gradient square and the gradient absolute measures.
@@ -43,11 +76,8 @@ class GpDGSMGpMean(object):
             model: A BoTorch model.
             bounds: Parameter bounds over which to evaluate model sensitivity.
             derivative_gp: If true, the derivative of the GP is used to compute
-                the gradient instead of backward. If `kernel_type` is matern_l1,
-                only the mean function of derivative GP can be used, and the
-                variance is not defined.
-            kernel_type: Takes "rbf" or "matern_l1" or "matern_l2", set only
-                if `derivative_gp` is true.
+                the gradient instead of backward.
+            kernel_type: Takes "rbf" or "matern", set only if `derivative_gp` is true.
             Y_scale: Scale the derivatives by this amount, to undo scaling
                 done on the training data.
             num_mc_samples: The number of MonteCarlo grid samples
@@ -57,6 +87,9 @@ class GpDGSMGpMean(object):
                 dgsm measure `num_bootstrap_samples` times by selecting subsamples
                 from the `input_mc_samples` and return the variance and standard error
                 across all computed measures.
+            discrete_features: If specified, the inputs associated with the indices in
+                this list are generated using an integer-valued uniform distribution,
+                rather than the default (pseudo-)random continuous uniform distribution.
         """
         # pyre-fixme[4]: Attribute must be annotated.
         self.dim = checked_cast(tuple, model.train_inputs)[0].shape[-1]
@@ -74,7 +107,7 @@ class GpDGSMGpMean(object):
         if input_qmc:
             # pyre-fixme[4]: Attribute must be annotated.
             self.input_mc_samples = (
-                draw_sobol_samples(bounds=bounds, n=num_mc_samples, q=1)
+                draw_sobol_samples(bounds=bounds, n=num_mc_samples, q=1, seed=1234)
                 .squeeze(1)
                 .to(dtype)
             )
@@ -83,9 +116,18 @@ class GpDGSMGpMean(object):
                 torch.rand(num_mc_samples, self.dim, dtype=dtype),
                 bounds=bounds,
             )
+
+        # uniform integral distribution for discrete features
+        self.input_mc_samples = sample_discrete_parameters(
+            input_mc_samples=self.input_mc_samples,
+            discrete_features=discrete_features,
+            bounds=bounds,
+            num_mc_samples=num_mc_samples,
+        )
+
         if self.derivative_gp:
             posterior = posterior_derivative(
-                model, self.input_mc_samples, not_none(self.kernel_type)
+                model, self.input_mc_samples, none_throws(self.kernel_type)
             )
         else:
             self.input_mc_samples.requires_grad = True
@@ -95,7 +137,7 @@ class GpDGSMGpMean(object):
         self._compute_gradient_quantities(posterior, Y_scale)
 
     def _compute_gradient_quantities(
-        self, posterior: Union[GPyTorchPosterior, MultivariateNormal], Y_scale: float
+        self, posterior: GPyTorchPosterior | MultivariateNormal, Y_scale: float
     ) -> None:
         if self.derivative_gp:
             self.mean_gradients = checked_cast(torch.Tensor, posterior.mean) * Y_scale
@@ -122,7 +164,7 @@ class GpDGSMGpMean(object):
     ) -> torch.Tensor:
         gradients_measure = torch.tensor(
             [
-                torch.mean(transform_fun(not_none(self.mean_gradients)[:, i]))
+                torch.mean(transform_fun(none_throws(self.mean_gradients)[:, i]))
                 for i in range(self.dim)
             ]
         )
@@ -136,7 +178,7 @@ class GpDGSMGpMean(object):
                         [
                             torch.mean(
                                 transform_fun(
-                                    not_none(self.mean_gradients_btsp)[b][:, i]
+                                    none_throws(self.mean_gradients_btsp)[b][:, i]
                                 )
                             )
                             for i in range(self.dim)
@@ -169,7 +211,7 @@ class GpDGSMGpMean(object):
             else
                 Tensor: (values) x dim
         """
-        return self.aggregation(torch.tensor)
+        return self.aggregation(torch.as_tensor)
 
     def gradient_absolute_measure(self) -> torch.Tensor:
         r"""Computes the gradient absolute measure:
@@ -195,9 +237,8 @@ class GpDGSMGpMean(object):
 
 
 class GpDGSMGpSampling(GpDGSMGpMean):
-
-    samples_gradients: Optional[torch.Tensor] = None
-    samples_gradients_btsp: Optional[List[torch.Tensor]] = None
+    samples_gradients: torch.Tensor | None = None
+    samples_gradients_btsp: list[torch.Tensor] | None = None
 
     def __init__(
         self,
@@ -205,7 +246,7 @@ class GpDGSMGpSampling(GpDGSMGpMean):
         bounds: torch.Tensor,
         num_gp_samples: int,
         derivative_gp: bool = False,
-        kernel_type: Optional[str] = None,
+        kernel_type: str | None = None,
         Y_scale: float = 1.0,
         num_mc_samples: int = 10**4,
         input_qmc: bool = False,
@@ -222,10 +263,8 @@ class GpDGSMGpSampling(GpDGSMGpMean):
             num_gp_samples: If method is "GP samples", the number of GP samples has
                 to be set.
             derivative_gp: If true, the derivative of the GP is used to compute the
-                gradient instead of backward. If `kernel_type` is matern_l1,
-                `derivative_gp` should be False because the variance is not defined.
-            kernel_type: Takes "rbf" or "matern_l1" or "matern_l2", set only if
-                `derivative_gp` is true.
+                gradient instead of backward.
+            kernel_type: Takes "rbf" or "matern", set only if `derivative_gp` is true.
             Y_scale: Scale the derivatives by this amount, to undo scaling done on
                 the training data.
             num_mc_samples: The number of Monte Carlo grid samples.
@@ -261,7 +300,7 @@ class GpDGSMGpSampling(GpDGSMGpMean):
         )
 
     def _compute_gradient_quantities(
-        self, posterior: Union[Posterior, MultivariateNormal], Y_scale: float
+        self, posterior: Posterior | MultivariateNormal, Y_scale: float
     ) -> None:
         if self.gp_sample_qmc:
             sampler = SobolQMCNormalSampler(
@@ -288,13 +327,13 @@ class GpDGSMGpSampling(GpDGSMGpMean):
             )
             self.samples_gradients_btsp = []
             for j in range(self.num_gp_samples):
-                not_none(self.samples_gradients_btsp).append(
+                none_throws(self.samples_gradients_btsp).append(
                     torch.cat(
                         [
                             torch.index_select(
-                                not_none(self.samples_gradients)[j], 0, indices
+                                none_throws(self.samples_gradients)[j], 0, indices
                             ).unsqueeze(0)
-                            for indices in not_none(self.bootstrap_indices)
+                            for indices in none_throws(self.bootstrap_indices)
                         ],
                         dim=0,
                     )
@@ -309,7 +348,7 @@ class GpDGSMGpSampling(GpDGSMGpMean):
                 torch.tensor(
                     [
                         torch.mean(
-                            transform_fun(not_none(self.samples_gradients)[j][:, i])
+                            transform_fun(none_throws(self.samples_gradients)[j][:, i])
                         )
                         for i in range(self.dim)
                     ]
@@ -341,7 +380,7 @@ class GpDGSMGpSampling(GpDGSMGpMean):
                         [
                             torch.mean(
                                 transform_fun(
-                                    not_none(self.samples_gradients_btsp)[j][b][:, i]
+                                    none_throws(self.samples_gradients_btsp)[j][b][:, i]
                                 )
                             )
                             for i in range(self.dim)
@@ -371,3 +410,34 @@ class GpDGSMGpSampling(GpDGSMGpMean):
                 dim=0,
             )
             return gradients_measure_mean_vargp_segp_varmc_segp
+
+
+def compute_derivatives_from_model_list(
+    model_list: list[Model],
+    bounds: torch.Tensor,
+    discrete_features: list[int] | None = None,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """
+    Computes average derivatives of a list of models on a bounded domain. Estimation
+    is according to the GP posterior mean function.
+
+    Args:
+        model_list: A list of m botorch.models.model.Model types for which to compute
+            the average derivative.
+        bounds: A 2 x d Tensor of lower and upper bounds of the domain of the models.
+        discrete_features: If specified, the inputs associated with the indices in
+            this list are generated using an integer-valued uniform distribution,
+            rather than the default (pseudo-)random continuous uniform distribution.
+        kwargs: Passed along to GpDGSMGpMean.
+
+    Returns:
+        A (m x d) tensor of gradient measures.
+    """
+    indices = []
+    for model in model_list:
+        sens_class = GpDGSMGpMean(
+            model=model, bounds=bounds, discrete_features=discrete_features, **kwargs
+        )
+        indices.append(sens_class.gradient_measure())
+    return torch.stack(indices)

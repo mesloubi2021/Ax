@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from unittest import mock
 from unittest.mock import Mock
 
@@ -28,6 +30,7 @@ from ax.utils.common.testutils import TestCase
 
 class DiscreteModelBridgeTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.parameters = [
             ChoiceParameter("x", ParameterType.FLOAT, values=[0, 1]),
             ChoiceParameter("y", ParameterType.STRING, values=["foo", "bar"]),

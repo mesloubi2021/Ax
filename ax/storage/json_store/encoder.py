@@ -4,24 +4,27 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import dataclasses
 import datetime
 import enum
 from collections import OrderedDict
+from collections.abc import Callable
 from inspect import isclass
-from typing import Any, Callable, Dict, Type
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-from ax.exceptions.storage import JSONEncodeError
+from ax.exceptions.storage import JSONEncodeError, STORAGE_DOCS_SUFFIX
 from ax.storage.json_store.encoders import tensor_to_dict
 from ax.storage.json_store.registry import (
     CORE_CLASS_ENCODER_REGISTRY,
     CORE_ENCODER_REGISTRY,
 )
 from ax.utils.common.serialization import _is_named_tuple
-from ax.utils.common.typeutils import numpy_type_to_python_type
+from ax.utils.common.typeutils_nonnative import numpy_type_to_python_type
 from ax.utils.common.typeutils_torch import torch_type_to_str
 
 
@@ -32,14 +35,14 @@ def object_to_json(  # noqa C901
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_ENCODER_REGISTRY,
     # pyre-fixme[2]: Parameter annotation cannot contain `Any`.
     # pyre-fixme[24]: Generic type `type` expects 1 type parameter, use
     #  `typing.Type` to avoid runtime subscripting errors.
-    class_encoder_registry: Dict[
-        Type, Callable[[Any], Dict[str, Any]]
+    class_encoder_registry: dict[
+        type, Callable[[Any], dict[str, Any]]
     ] = CORE_CLASS_ENCODER_REGISTRY,
 ) -> Any:
     """Convert an Ax object to a JSON-serializable dictionary.
@@ -63,7 +66,6 @@ def object_to_json(  # noqa C901
     if isclass(obj):
         for class_type in class_encoder_registry:
             if issubclass(obj, class_type):
-
                 obj_dict = class_encoder_registry[class_type](obj)
                 return {
                     k: object_to_json(
@@ -133,6 +135,7 @@ def object_to_json(  # noqa C901
             },
         }
     elif dataclasses.is_dataclass(obj):
+        field_names = [f.name for f in dataclasses.fields(obj)]
         return {
             "__type": _type.__name__,
             **{
@@ -142,6 +145,7 @@ def object_to_json(  # noqa C901
                     class_encoder_registry=class_encoder_registry,
                 )
                 for k, v in obj.__dict__.items()
+                if k in field_names
             },
         }
 
@@ -183,6 +187,6 @@ def object_to_json(  # noqa C901
     err = (
         f"Object {obj} passed to `object_to_json` (of type {_type}, module: "
         f"{_type.__module__}) is not registered with a corresponding encoder "
-        "in ENCODER_REGISTRY."
+        f"in ENCODER_REGISTRY. {STORAGE_DOCS_SUFFIX}"
     )
     raise JSONEncodeError(err)

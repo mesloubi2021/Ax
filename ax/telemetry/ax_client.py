@@ -3,10 +3,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ax.service.ax_client import AxClient
 from ax.telemetry.common import _get_max_transformed_dimensionality
@@ -27,12 +29,12 @@ class AxClientCreatedRecord:
     generation_strategy_created_record: GenerationStrategyCreatedRecord
 
     arms_per_trial: int
-    early_stopping_strategy_cls: Optional[str]
-    global_stopping_strategy_cls: Optional[str]
+    early_stopping_strategy_cls: str | None
+    global_stopping_strategy_cls: str | None
 
     # Dimensionality of transformed SearchSpace can often be much higher due to one-hot
     # encoding of unordered ChoiceParameters
-    transformed_dimensionality: int
+    transformed_dimensionality: int | None
 
     @classmethod
     def from_ax_client(cls, ax_client: AxClient) -> AxClientCreatedRecord:
@@ -70,7 +72,7 @@ class AxClientCreatedRecord:
             ),
         )
 
-    def flatten(self) -> Dict[str, Any]:
+    def flatten(self) -> dict[str, Any]:
         """
         Flatten into an appropriate format for logging to a tabular database.
         """
@@ -109,14 +111,14 @@ class AxClientCompletedRecord:
             experiment_completed_record=ExperimentCompletedRecord.from_experiment(
                 experiment=ax_client.experiment
             ),
-            best_point_quality=float("-inf"),  # TODO[T147907632]
-            model_fit_quality=float("-inf"),  # TODO[T147907632]
-            model_std_quality=float("-inf"),
-            model_fit_generalization=float("-inf"),  # TODO via cross_validate_by_trial
-            model_std_generalization=float("-inf"),
+            best_point_quality=float("nan"),  # TODO[T147907632]
+            model_fit_quality=float("nan"),  # TODO[T147907632]
+            model_std_quality=float("nan"),
+            model_fit_generalization=float("nan"),
+            model_std_generalization=float("nan"),
         )
 
-    def flatten(self) -> Dict[str, Any]:
+    def flatten(self) -> dict[str, Any]:
         """
         Flatten into an appropriate format for logging to a tabular database.
         """

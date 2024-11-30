@@ -4,45 +4,46 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from contextlib import ExitStack
-from typing import Any, Dict, Tuple
+from typing import Any, cast
 from unittest import mock
 
 import numpy as np
 import torch
 from ax.core.search_space import SearchSpaceDigest
+from ax.models.torch.botorch_defaults import NO_OBSERVED_POINTS_MESSAGE
 from ax.models.torch.botorch_moo import MultiObjectiveBotorchModel
 from ax.models.torch.botorch_moo_defaults import (
-    get_EHVI,
-    get_NEHVI,
     get_outcome_constraint_transforms,
+    get_qLogEHVI,
+    get_qLogNEHVI,
     get_weighted_mc_objective_and_objective_thresholds,
     infer_objective_thresholds,
     pareto_frontier_evaluator,
 )
 from ax.models.torch.utils import _get_X_pending_and_observed
+from ax.utils.common.random import with_rng_seed
 from ax.utils.common.testutils import TestCase
+from botorch.models.gp_regression import SingleTaskGP
 from botorch.utils.datasets import SupervisedDataset
 from botorch.utils.multi_objective.hypervolume import infer_reference_point
-from botorch.utils.sampling import manual_seed
 from botorch.utils.testing import MockModel, MockPosterior
 from torch._tensor import Tensor
 
 
-GET_ACQF_PATH = "ax.models.torch.botorch_moo_defaults.get_acquisition_function"
-GET_CONSTRAINT_PATH = (
-    "ax.models.torch.botorch_moo_defaults.get_outcome_constraint_transforms"
+MOO_DEFAULTS_PATH: str = "ax.models.torch.botorch_moo_defaults"
+GET_ACQF_PATH: str = MOO_DEFAULTS_PATH + ".get_acquisition_function"
+GET_CONSTRAINT_PATH: str = MOO_DEFAULTS_PATH + ".get_outcome_constraint_transforms"
+GET_OBJ_PATH: str = (
+    MOO_DEFAULTS_PATH + ".get_weighted_mc_objective_and_objective_thresholds"
 )
-GET_OBJ_PATH = (
-    "ax.models.torch.botorch_moo_defaults."
-    "get_weighted_mc_objective_and_objective_thresholds"
-)
-
 FIT_MODEL_MO_PATH = "ax.models.torch.botorch_defaults.fit_gpytorch_mll"
 
 
 # pyre-fixme[2]: Parameter must be annotated.
-def dummy_predict(model, X) -> Tuple[Tensor, Tensor]:
+def dummy_predict(model, X) -> tuple[Tensor, Tensor]:
     # Add column to X that is a product of previous elements.
     mean = torch.cat([X, torch.prod(X, dim=1).reshape(-1, 1)], dim=1)
     cov = torch.zeros(mean.shape[0], mean.shape[1], mean.shape[1])
@@ -51,6 +52,7 @@ def dummy_predict(model, X) -> Tuple[Tensor, Tensor]:
 
 class FrontierEvaluatorTest(TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.X = torch.tensor(
             [[1.0, 0.0], [1.0, 1.0], [1.0, 3.0], [2.0, 2.0], [3.0, 1.0]]
         )
@@ -83,7 +85,6 @@ class FrontierEvaluatorTest(TestCase):
                         outcome_names=["a", "b", "c"],
                     )
                 ],
-                metric_names=["a", "b", "c"],
                 search_space_digest=SearchSpaceDigest(
                     feature_names=["x1", "x2"],
                     bounds=bounds,
@@ -183,16 +184,59 @@ class FrontierEvaluatorTest(TestCase):
         )
         self.assertTrue(torch.equal(torch.tensor([2], dtype=torch.long), indx))
 
+    def test_pareto_frontier_evaluator_with_nan(self) -> None:
+        Y = torch.cat([self.Y, torch.zeros(5, 1)], dim=-1)
+        Yvar = torch.zeros(5, 4, 4)
+        weights = torch.tensor([1.0, 1.0, 0.0, 0.0])
+        outcome_constraints = (
+            torch.tensor([[0.0, 0.0, 1.0, 0.0]]),
+            torch.tensor([[3.5]]),
+        )
+        # Evaluate without NaNs as a baseline.
+        _, _, idx = pareto_frontier_evaluator(
+            model=None, objective_weights=weights, Y=Y, Yvar=Yvar
+        )
+        self.assertEqual(idx.tolist(), [2, 3, 4])
+        # Set an element of idx 2 to NaN. Should be removed.
+        Y[2, 1] = float("nan")
+        _, _, idx = pareto_frontier_evaluator(
+            model=None, objective_weights=weights, Y=Y, Yvar=Yvar
+        )
+        self.assertEqual(idx.tolist(), [3, 4])
+        # Set the unused constraint element of idx 3 to NaN. No effect.
+        Y[3, 2] = float("nan")
+        _, _, idx = pareto_frontier_evaluator(
+            model=None, objective_weights=weights, Y=Y, Yvar=Yvar
+        )
+        self.assertEqual(idx.tolist(), [3, 4])
+        # Add constraint, 3 should be removed.
+        _, _, idx = pareto_frontier_evaluator(
+            model=None,
+            objective_weights=weights,
+            Y=Y,
+            Yvar=Yvar,
+            outcome_constraints=outcome_constraints,
+        )
+        self.assertEqual(idx.tolist(), [4])
+        # Set unused index of 4 to NaN. No effect.
+        Y[4, 3] = float("nan")
+        _, _, idx = pareto_frontier_evaluator(
+            model=None,
+            objective_weights=weights,
+            Y=Y,
+            Yvar=Yvar,
+            outcome_constraints=outcome_constraints,
+        )
+        self.assertEqual(idx.tolist(), [4])
+
 
 class BotorchMOODefaultsTest(TestCase):
-    def test_get_EHVI_input_validation_errors(self) -> None:
+    def test_get_qLogEHVI_input_validation_errors(self) -> None:
         weights = torch.ones(2)
         objective_thresholds = torch.zeros(2)
         mm = MockModel(MockPosterior())
-        with self.assertRaisesRegex(
-            ValueError, "There are no feasible observed points."
-        ):
-            get_EHVI(
+        with self.assertRaisesRegex(ValueError, NO_OBSERVED_POINTS_MESSAGE):
+            get_qLogEHVI(
                 model=mm,
                 objective_weights=weights,
                 objective_thresholds=objective_thresholds,
@@ -212,14 +256,12 @@ class BotorchMOODefaultsTest(TestCase):
         self.assertEqual(weighted_obj.outcomes.tolist(), [1, 3])
         self.assertTrue(torch.equal(new_obj_thresholds, objective_thresholds[[1, 3]]))
 
-    def test_get_NEHVI_input_validation_errors(self) -> None:
+    def test_get_qLogNEHVI_input_validation_errors(self) -> None:
         model = MultiObjectiveBotorchModel()
         weights = torch.ones(2)
         objective_thresholds = torch.zeros(2)
-        with self.assertRaisesRegex(
-            ValueError, "There are no feasible observed points."
-        ):
-            get_NEHVI(
+        with self.assertRaisesRegex(ValueError, NO_OBSERVED_POINTS_MESSAGE):
+            get_qLogNEHVI(
                 # pyre-fixme[6]: For 1st param expected `Model` but got
                 #  `Optional[Model]`.
                 model=model._model,
@@ -231,7 +273,7 @@ class BotorchMOODefaultsTest(TestCase):
         "ax.models.torch.botorch_moo_defaults._check_posterior_type",
         wraps=lambda y: y,
     )
-    def test_get_ehvi(self, _) -> None:
+    def test_get_qLogEHVI(self, _) -> None:
         weights = torch.tensor([0.0, 1.0, 1.0])
         X_observed = torch.rand(4, 3)
         X_pending = torch.rand(1, 3)
@@ -245,14 +287,17 @@ class BotorchMOODefaultsTest(TestCase):
         )
         (weighted_obj, new_obj_thresholds) = obj_and_obj_t
         cons_tfs = get_outcome_constraint_transforms(constraints)
-        with manual_seed(0):
+        with with_rng_seed(0):
             seed = torch.randint(1, 10000, (1,)).item()
         with ExitStack() as es:
             mock_get_acqf = es.enter_context(mock.patch(GET_ACQF_PATH))
+            es.enter_context(
+                mock.patch(MOO_DEFAULTS_PATH + ".checked_cast", wraps=cast)
+            )
             es.enter_context(mock.patch(GET_CONSTRAINT_PATH, return_value=cons_tfs))
             es.enter_context(mock.patch(GET_OBJ_PATH, return_value=obj_and_obj_t))
-            es.enter_context(manual_seed(0))
-            get_EHVI(
+            es.enter_context(with_rng_seed(0))
+            get_qLogEHVI(
                 model=mm,
                 objective_weights=weights,
                 outcome_constraints=constraints,
@@ -261,7 +306,7 @@ class BotorchMOODefaultsTest(TestCase):
                 X_pending=X_pending,
             )
             mock_get_acqf.assert_called_once_with(
-                acquisition_function_name="qEHVI",
+                acquisition_function_name="qLogEHVI",
                 model=mm,
                 objective=weighted_obj,
                 X_observed=X_observed,
@@ -280,8 +325,9 @@ class BotorchMOODefaultsTest(TestCase):
         wraps=lambda y: y,
     )
     def test_infer_objective_thresholds(self, _, cuda: bool = False) -> None:
+        # TODO: refactor this test into smaller test cases
         for dtype in (torch.float, torch.double):
-            tkwargs: Dict[str, Any] = {
+            tkwargs: dict[str, Any] = {
                 "device": torch.device("cuda") if cuda else torch.device("cpu"),
                 "dtype": dtype,
             }
@@ -310,33 +356,23 @@ class BotorchMOODefaultsTest(TestCase):
                         wraps=infer_reference_point,
                     )
                 )
-                # after subsetting, the model will only have two outputs
-                _mock_num_outputs = es.enter_context(
-                    mock.patch(
-                        "botorch.utils.testing.MockModel.num_outputs",
-                        new_callable=mock.PropertyMock,
-                    )
-                )
-                _mock_num_outputs.return_value = 3
-                # after subsetting, the model will only have two outputs
-                model = MockModel(
-                    MockPosterior(
-                        mean=torch.tensor(
-                            [
-                                [11.0, 2.0],
-                                [9.0, 3.0],
-                            ],
-                            **tkwargs,
-                        )
-                    )
-                )
+                model = SingleTaskGP(train_X=Xs[0], train_Y=torch.rand(2, 3, **tkwargs))
                 es.enter_context(
                     mock.patch.object(
                         model,
-                        "subset_output",
-                        return_value=model,
+                        "posterior",
+                        return_value=MockPosterior(
+                            mean=torch.tensor(
+                                [
+                                    [11.0, 2.0],
+                                    [9.0, 3.0],
+                                ],
+                                **tkwargs,
+                            )
+                        ),
                     )
                 )
+
                 # test passing Xs
                 obj_thresholds = infer_objective_thresholds(
                     model,
@@ -390,16 +426,19 @@ class BotorchMOODefaultsTest(TestCase):
                         wraps=infer_reference_point,
                     )
                 )
-                model = MockModel(
-                    MockPosterior(
-                        mean=torch.tensor(
-                            # after subsetting, there should only be two outcomes
-                            [
-                                [11.0, 2.0],
-                                [9.0, 3.0],
-                            ],
-                            **tkwargs,
-                        )
+                es.enter_context(
+                    mock.patch.object(
+                        model,
+                        "posterior",
+                        return_value=MockPosterior(
+                            mean=torch.tensor(
+                                [
+                                    [11.0, 2.0],
+                                    [9.0, 3.0],
+                                ],
+                                **tkwargs,
+                            )
+                        ),
                     )
                 )
 
@@ -430,19 +469,24 @@ class BotorchMOODefaultsTest(TestCase):
                     objective_weights=objective_weights,
                 )
             # test subset_model without subset_idcs
-            subset_model = MockModel(
-                MockPosterior(
-                    mean=torch.tensor(
-                        [
-                            [11.0, 2.0],
-                            [9.0, 3.0],
-                        ],
-                        **tkwargs,
-                    )
+            es.enter_context(
+                mock.patch.object(
+                    model,
+                    "posterior",
+                    return_value=MockPosterior(
+                        mean=torch.tensor(
+                            [
+                                [11.0, 2.0],
+                                [9.0, 3.0],
+                            ],
+                            **tkwargs,
+                        )
+                    ),
                 )
             )
+
             obj_thresholds = infer_objective_thresholds(
-                subset_model,
+                model,
                 objective_weights=objective_weights,
                 outcome_constraints=outcome_constraints,
                 X_observed=Xs[0],
@@ -458,7 +502,7 @@ class BotorchMOODefaultsTest(TestCase):
                 device=tkwargs["device"],
             )
             obj_thresholds = infer_objective_thresholds(
-                subset_model,
+                model,
                 objective_weights=objective_weights,
                 outcome_constraints=outcome_constraints,
                 X_observed=Xs[0],
@@ -488,15 +532,19 @@ class BotorchMOODefaultsTest(TestCase):
                         wraps=infer_reference_point,
                     )
                 )
-                model = MockModel(
-                    MockPosterior(
-                        mean=torch.tensor(
-                            [
-                                [11.0, 2.0, 6.0],
-                                [9.0, 3.0, 4.0],
-                            ],
-                            **tkwargs,
-                        )
+                es.enter_context(
+                    mock.patch.object(
+                        model,
+                        "posterior",
+                        return_value=MockPosterior(
+                            mean=torch.tensor(
+                                [
+                                    [11.0, 2.0, 6.0],
+                                    [9.0, 3.0, 4.0],
+                                ],
+                                **tkwargs,
+                            )
+                        ),
                     )
                 )
                 # test passing Xs

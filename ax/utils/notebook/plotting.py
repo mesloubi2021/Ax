@@ -4,6 +4,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 from logging import Logger
 
 from ax.plot.base import AxPlotConfig, AxPlotTypes
@@ -20,6 +22,13 @@ def init_notebook_plotting(offline: bool = False) -> None:
     display_bundle = {"text/html": _wrap_js(_js_requires(offline=offline))}
     display(display_bundle, raw=True)
     logger.info("Injecting Plotly library into cell. Do not overwrite or delete cell.")
+    logger.info(
+        """
+    Please see
+    (https://ax.dev/tutorials/visualizations.html#Fix-for-plots-that-are-not-rendering)
+    if visualizations are not rendering.
+    """.strip()
+    )
     init_notebook_mode()
 
 

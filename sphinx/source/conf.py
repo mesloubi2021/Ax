@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
@@ -60,9 +59,9 @@ source_suffix = ".rst"
 index_doc = "index"
 
 # General information about the project.
-project = u"Ax"
-copyright = u"2019, Facebook Inc."
-author = u"Facebook Inc."
+project = "Ax"
+copyright = "2019, Facebook Inc."
+author = "Facebook Inc."
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -78,7 +77,7 @@ release = "0.0.1"
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = 'en'
 
 # There are two options for replacing |today|: either, you set today to some
 # non-false value, then it is used:
@@ -211,14 +210,14 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (index_doc, "Ax.tex", u"Ax Documentation", u"Facebook Inc.", "manual")
+    (index_doc, "Ax.tex", "Ax Documentation", "Facebook Inc.", "manual")
 ]
 
 # -- Options for manual page output ---------------------------------------
 
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
-man_pages = [(index_doc, "ax", u"Ax Documentation", [author], 1)]
+man_pages = [(index_doc, "ax", "Ax Documentation", [author], 1)]
 
 # If true, show URL addresses after external links.
 # man_show_urls = False
@@ -233,7 +232,7 @@ texinfo_documents = [
     (
         index_doc,
         "Ax",
-        u"Ax Documentation",
+        "Ax Documentation",
         author,
         "Ax",
         "Platform for automated optimization and experimentation.",
@@ -242,7 +241,7 @@ texinfo_documents = [
 ]
 
 # Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {"https://docs.python.org/": None}
+intersphinx_mapping = {'<name>': ('https://docs.python.org/', None)}
 
 # -- Autodocs Configuration -------------------------------------------
 
@@ -252,9 +251,9 @@ set_type_checking_flag = True
 
 # Mock SQLAlchemy base; otherwise have issues with trying to register same
 # class (with same table) multiple times through autodocs
-# Also mock Pandas to avoid circular imports due to TYPE_CHECKING = True
 autodoc_mock_imports = [
     "sqlalchemy",
-    "pandas",
+    "plotly",
+    "tensorboard",
     "__test_modules__",
 ]

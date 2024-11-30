@@ -4,13 +4,19 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, List, Optional, TYPE_CHECKING
+# pyre-strict
+
+from typing import Any, Optional, TYPE_CHECKING
 
 from ax.core.observation import Observation
 from ax.core.parameter import ChoiceParameter, Parameter, ParameterType
 from ax.core.search_space import SearchSpace
 from ax.core.types import TParamValue
-from ax.modelbridge.transforms.choice_encode import OrderedChoiceEncode
+from ax.modelbridge.transforms.choice_encode import OrderedChoiceToIntegerRange
+
+from ax.modelbridge.transforms.deprecated_transform_mixin import (
+    DeprecatedTransformMixin,
+)
 from ax.modelbridge.transforms.utils import construct_new_search_space
 from ax.models.types import TConfig
 
@@ -19,7 +25,7 @@ if TYPE_CHECKING:
     from ax import modelbridge as modelbridge_module  # noqa F401
 
 
-class TaskEncode(OrderedChoiceEncode):
+class TaskChoiceToIntTaskChoice(OrderedChoiceToIntegerRange):
     """Convert task ChoiceParameters to integer-valued ChoiceParameters.
 
     Parameters will be transformed to an integer ChoiceParameter with
@@ -33,15 +39,17 @@ class TaskEncode(OrderedChoiceEncode):
 
     def __init__(
         self,
-        search_space: Optional[SearchSpace] = None,
-        observations: Optional[List[Observation]] = None,
+        search_space: SearchSpace | None = None,
+        observations: list[Observation] | None = None,
         modelbridge: Optional["modelbridge_module.base.ModelBridge"] = None,
-        config: Optional[TConfig] = None,
+        config: TConfig | None = None,
     ) -> None:
-        assert search_space is not None, "TaskEncode requires search space"
+        assert (
+            search_space is not None
+        ), "TaskChoiceToIntTaskChoice requires search space"
         # Identify parameters that should be transformed
-        self.encoded_parameters: Dict[str, Dict[TParamValue, int]] = {}
-        self.target_values: Dict[str, int] = {}
+        self.encoded_parameters: dict[str, dict[TParamValue, int]] = {}
+        self.target_values: dict[str, int] = {}
         for p in search_space.parameters.values():
             if isinstance(p, ChoiceParameter) and p.is_task:
                 if p.is_fidelity:
@@ -56,7 +64,7 @@ class TaskEncode(OrderedChoiceEncode):
                 self.target_values[p.name] = self.encoded_parameters[p.name][
                     p.target_value
                 ]
-        self.encoded_parameters_inverse: Dict[str, Dict[int, TParamValue]] = {
+        self.encoded_parameters_inverse: dict[str, dict[int, TParamValue]] = {
             p_name: {
                 transformed_value: original_value
                 for original_value, transformed_value in transforms.items()
@@ -65,7 +73,7 @@ class TaskEncode(OrderedChoiceEncode):
         }
 
     def _transform_search_space(self, search_space: SearchSpace) -> SearchSpace:
-        transformed_parameters: Dict[str, Parameter] = {}
+        transformed_parameters: dict[str, Parameter] = {}
         for p_name, p in search_space.parameters.items():
             if p_name in self.encoded_parameters and isinstance(p, ChoiceParameter):
                 if p.is_fidelity:
@@ -94,3 +102,10 @@ class TaskEncode(OrderedChoiceEncode):
                 for pc in search_space.parameter_constraints
             ],
         )
+
+
+class TaskEncode(DeprecatedTransformMixin, TaskChoiceToIntTaskChoice):
+    """Deprecated alias for TaskChoiceToIntTaskChoice."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)

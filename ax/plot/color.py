@@ -4,12 +4,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import enum
 from numbers import Real
-from typing import List, Tuple
 
 # type aliases
-TRGB = Tuple[Real, ...]
+TRGB = tuple[Real, ...]
 
 
 class COLORS(enum.Enum):
@@ -103,10 +104,10 @@ def rgba(rgb_tuple: TRGB, alpha: float = 1) -> str:
 
 
 def plotly_color_scale(
-    list_of_rgb_tuples: List[TRGB],
+    list_of_rgb_tuples: list[TRGB],
     reverse: bool = False,
     alpha: float = 1,
-) -> List[Tuple[float, str]]:
+) -> list[tuple[float, str]]:
     """Convert list of RGB tuples to list of tuples, where each tuple is
     break in [0, 1] and stringified RGBA color.
     """
