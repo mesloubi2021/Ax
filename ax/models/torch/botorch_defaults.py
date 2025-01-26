@@ -572,8 +572,6 @@ def recommend_best_observed_point(
     )
     if x_best is None:
         return None
-    # pyre-fixme[16]: Item `ndarray` of `Union[ndarray[typing.Any, typing.Any],
-    #  Tensor]` has no attribute `to`.
     return x_best.to(dtype=model.dtype, device=torch.device("cpu"))
 
 
@@ -760,7 +758,7 @@ def _get_aug_batch_shape(X: Tensor, Y: Tensor) -> torch.Size:
     num_outputs = Y.shape[-1]
     if num_outputs > 1:
         batch_shape += torch.Size([num_outputs])  # pyre-ignore
-    return batch_shape  # pyre-ignore
+    return batch_shape
 
 
 def get_warping_transform(
@@ -782,12 +780,18 @@ def get_warping_transform(
     # apply warping to all non-task features, including fidelity features
     if task_feature is not None:
         del indices[task_feature]
+    # Legacy Ax models operate in the unit cube
+    bounds = torch.zeros(2, d, dtype=torch.double)
+    bounds[1] = 1
     # Note: this currently uses the same warping functions for all tasks
     tf = Warp(
+        d=d,
         indices=indices,
         # prior with a median of 1
         concentration1_prior=LogNormalPrior(0.0, 0.75**0.5),
         concentration0_prior=LogNormalPrior(0.0, 0.75**0.5),
         batch_shape=batch_shape,
+        # Legacy Ax models operate in the unit cube
+        bounds=bounds,
     )
     return tf

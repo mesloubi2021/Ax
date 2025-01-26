@@ -55,8 +55,7 @@ from ax.utils.common.executils import retry_on_exception
 from ax.utils.common.logger import _round_floats_for_logging, get_logger
 from ax.utils.common.result import Err, Ok
 from ax.utils.common.timeutils import current_timestamp_in_millis
-from ax.utils.common.typeutils import checked_cast
-from pyre_extensions import none_throws
+from pyre_extensions import assert_is_instance, none_throws
 
 logger: logging.Logger = get_logger(__name__)
 
@@ -113,7 +112,10 @@ class Experiment(Base):
             description: Description of the experiment.
             is_test: Convenience metadata tracker for the user to mark test experiments.
             experiment_type: The class of experiments this one belongs to.
-            properties: Dictionary of this experiment's properties.
+            properties: Dictionary of this experiment's properties.  It is meant to
+                only store primitives that pertain to Ax experiment state. Any trial
+                deployment-related information and modeling-layer configuration
+                should be stored elsewhere, e.g. in ``run_metadata`` of the trials.
             default_data_type: Enum representing the data type this experiment uses.
             auxiliary_experiments_by_purpose: Dictionary of auxiliary experiments
                 for different purposes (e.g., transfer learning).
@@ -1386,8 +1388,8 @@ class Experiment(Base):
                 old_data = (
                     old_experiment.default_data_constructor(
                         df=new_df,
-                        map_key_infos=checked_cast(
-                            MapData, old_experiment.lookup_data()
+                        map_key_infos=assert_is_instance(
+                            old_experiment.lookup_data(), MapData
                         ).map_key_infos,
                     )
                     if old_experiment.default_data_type == DataType.MAP_DATA
@@ -1600,7 +1602,7 @@ class Experiment(Base):
             # data for this arm "complete" in the flattened search space.
             candidate_metadata = None
             if self.search_space.is_hierarchical:
-                hss = checked_cast(HierarchicalSearchSpace, self.search_space)
+                hss = assert_is_instance(self.search_space, HierarchicalSearchSpace)
                 candidate_metadata = hss.cast_observation_features(
                     observation_features=hss.flatten_observation_features(
                         observation_features=observation.ObservationFeatures(
@@ -1641,6 +1643,7 @@ class Experiment(Base):
         properties: dict[str, Any] | None = None,
         trial_indices: list[int] | None = None,
         data: Data | None = None,
+        clear_trial_type: bool = False,
     ) -> Experiment:
         r"""
         Return a copy of this experiment with some attributes replaced.
@@ -1670,6 +1673,8 @@ class Experiment(Base):
             data: If specified, attach this data to the cloned experiment. If None,
                 clones the latest data attached to the original experiment if
                 the experiment has any data.
+            clear_trial_type: If True, all cloned trials on the cloned experiment have
+                `trial_type` set to `None`.
         """
         search_space = (
             self.search_space.clone() if (search_space is None) else search_space
@@ -1736,7 +1741,9 @@ class Experiment(Base):
         for trial_index in trial_indices_to_keep.intersection(original_trial_indices):
             trial = self.trials[trial_index]
             if isinstance(trial, BatchTrial) or isinstance(trial, Trial):
-                new_trial = trial.clone_to(cloned_experiment)
+                new_trial = trial.clone_to(
+                    cloned_experiment, clear_trial_type=clear_trial_type
+                )
                 new_index = new_trial.index
                 trial_data, timestamp = self.lookup_data_for_trial(trial_index)
                 # Clone the data to avoid overwriting the original in the DB.
@@ -1777,7 +1784,9 @@ class Experiment(Base):
         if self.optimization_config is not None:
             opt_config = self.optimization_config
             if self.is_moo_problem:
-                multi_objective = checked_cast(MultiObjective, opt_config.objective)
+                multi_objective = assert_is_instance(
+                    opt_config.objective, MultiObjective
+                )
                 objectives = multi_objective.objectives
             else:
                 objectives = [opt_config.objective]

@@ -5,7 +5,7 @@
 
 # pyre-strict
 
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -141,6 +141,7 @@ class MapTorchModelBridge(TorchModelBridge):
             status_quo_features=status_quo_features,
             optimization_config=optimization_config,
             fit_out_of_design=fit_out_of_design,
+            fit_abandoned=fit_abandoned,
             fit_on_init=fit_on_init,
             default_model_gen_options=default_model_gen_options,
         )
@@ -237,7 +238,7 @@ class MapTorchModelBridge(TorchModelBridge):
     def _array_to_observation_features(
         self,
         X: npt.NDArray,
-        candidate_metadata: list[TCandidateMetadata] | None,
+        candidate_metadata: Sequence[TCandidateMetadata] | None,
     ) -> list[ObservationFeatures]:
         """The difference b/t this method and
         TorchModelBridge._array_to_observation_features(...) is

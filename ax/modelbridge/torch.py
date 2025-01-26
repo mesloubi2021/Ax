@@ -12,7 +12,8 @@ from collections import defaultdict
 from collections.abc import Callable
 from copy import deepcopy
 from logging import Logger
-from typing import Any
+from typing import Any, Sequence
+from warnings import warn
 
 import numpy as np
 import numpy.typing as npt
@@ -119,7 +120,19 @@ class TorchModelBridge(ModelBridge):
         fit_on_init: bool = True,
         default_model_gen_options: TConfig | None = None,
     ) -> None:
-        self.dtype: torch.dtype = torch.double if torch_dtype is None else torch_dtype
+        # This warning is being added while we are on 0.4.3, so it will be
+        # released in 0.4.4 or 0.5.0. The `torch_dtype` argument can be removed
+        # in the subsequent minor version. It should also be removed from
+        # `TorchModelBridge` subclasses.
+        if torch_dtype is not None:
+            warn(
+                "The `torch_dtype` argument to `TorchModelBridge` is deprecated"
+                " and will be ignored; data will be in double precision.",
+                DeprecationWarning,
+            )
+
+        # Note: When `torch_dtype` is removed, this attribute can be removed
+        self.dtype: torch.dtype = torch.double
         self.device = torch_device
         # pyre-ignore [4]: Attribute `_default_model_gen_options` of class
         # `TorchModelBridge` must have a type that does not contain `Any`.
@@ -701,7 +714,7 @@ class TorchModelBridge(ModelBridge):
             torch_opt_config=torch_opt_config,
         )
 
-        gen_metadata = gen_results.gen_metadata
+        gen_metadata = dict(gen_results.gen_metadata)
         if (
             isinstance(optimization_config, MultiObjectiveOptimizationConfig)
             and gen_metadata.get("objective_thresholds", None) is not None
@@ -736,7 +749,9 @@ class TorchModelBridge(ModelBridge):
         best_obsf = None
         if xbest is not None:
             best_obsf = ObservationFeatures(
-                parameters={p: float(xbest[i]) for i, p in enumerate(self.parameters)}
+                parameters={
+                    p: float(x) for p, x in zip(self.parameters, xbest, strict=True)
+                }
             )
 
         return GenResults(
@@ -770,7 +785,7 @@ class TorchModelBridge(ModelBridge):
     def _array_to_observation_features(
         self,
         X: npt.NDArray,
-        candidate_metadata: list[TCandidateMetadata] | None,
+        candidate_metadata: Sequence[TCandidateMetadata] | None,
     ) -> list[ObservationFeatures]:
         return parse_observation_features(
             X=X, param_names=self.parameters, candidate_metadata=candidate_metadata
@@ -899,7 +914,9 @@ class TorchModelBridge(ModelBridge):
             )
         except (KeyError, TypeError):
             raise ValueError("Invalid formatting of observation data.")
-        X = self._transform_observation_features(observation_features)
+        X = self._transform_observation_features(
+            observation_features=observation_features
+        )
         return X, self._array_to_tensor(mean), self._array_to_tensor(cov)
 
     def _untransform_objective_thresholds(

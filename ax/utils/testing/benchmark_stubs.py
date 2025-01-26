@@ -5,14 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-strict
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 import numpy as np
 import torch
 from ax.benchmark.benchmark_method import BenchmarkMethod
-from ax.benchmark.benchmark_metric import BenchmarkMapMetric, BenchmarkMetric
+from ax.benchmark.benchmark_metric import (
+    BenchmarkMapMetric,
+    BenchmarkMapUnavailableWhileRunningMetric,
+    BenchmarkMetric,
+    BenchmarkTimeVaryingMetric,
+)
 from ax.benchmark.benchmark_problem import (
     BenchmarkProblem,
     create_problem_from_botorch,
@@ -23,6 +27,7 @@ from ax.benchmark.benchmark_result import AggregatedBenchmarkResult, BenchmarkRe
 from ax.benchmark.benchmark_step_runtime_function import TBenchmarkStepRuntimeFunction
 from ax.benchmark.benchmark_test_function import BenchmarkTestFunction
 from ax.benchmark.benchmark_test_functions.surrogate import SurrogateTestFunction
+from ax.benchmark.benchmark_test_functions.synthetic import IdentityTestFunction
 from ax.benchmark.problems.synthetic.hss.jenatton import get_jenatton_search_space
 from ax.core.arm import Arm
 from ax.core.batch_trial import BatchTrial
@@ -65,6 +70,7 @@ def get_single_objective_benchmark_problem(
         report_inference_value_as_trace=report_inference_value_as_trace,
         noise_std=noise_std,
         status_quo_params=status_quo_params,
+        baseline_value=3,
     )
 
 
@@ -80,6 +86,7 @@ def get_multi_objective_benchmark_problem(
         num_trials=num_trials,
         observe_noise_sd=observe_noise_sd,
         report_inference_value_as_trace=report_inference_value_as_trace,
+        baseline_value=0.0,
     )
 
 
@@ -94,16 +101,13 @@ def get_soo_surrogate_test_function(lazy: bool = True) -> SurrogateTestFunction:
     )
     if lazy:
         test_function = SurrogateTestFunction(
-            outcome_names=["branin"],
-            name="test",
-            get_surrogate_and_datasets=lambda: (surrogate, []),
+            outcome_names=["branin"], name="test", get_surrogate=lambda: surrogate
         )
     else:
         test_function = SurrogateTestFunction(
             outcome_names=["branin"],
             name="test",
             _surrogate=surrogate,
-            _datasets=[],
         )
     return test_function
 
@@ -123,6 +127,7 @@ def get_soo_surrogate() -> BenchmarkProblem:
         optimization_config=optimization_config,
         num_trials=6,
         optimal_value=0.0,
+        baseline_value=3.0,
         test_function=test_function,
     )
 
@@ -139,9 +144,7 @@ def get_moo_surrogate() -> BenchmarkProblem:
 
     outcome_names = ["branin_a", "branin_b"]
     test_function = SurrogateTestFunction(
-        name="test",
-        outcome_names=outcome_names,
-        get_surrogate_and_datasets=lambda: (surrogate, []),
+        name="test", outcome_names=outcome_names, get_surrogate=lambda: surrogate
     )
     optimization_config = get_moo_opt_config(
         outcome_names=outcome_names,
@@ -155,6 +158,7 @@ def get_moo_surrogate() -> BenchmarkProblem:
         optimization_config=optimization_config,
         num_trials=10,
         optimal_value=1.0,
+        baseline_value=0.0,
         test_function=test_function,
     )
 
@@ -297,28 +301,13 @@ class DeterministicGenerationNode(ExternalGenerationNode):
         return {self.param_name: next(self.iterator)}
 
 
-@dataclass(kw_only=True)
-class IdentityTestFunction(BenchmarkTestFunction):
-    outcome_names: Sequence[str] = field(default_factory=lambda: ["objective"])
-    n_steps: int = 1
-
-    # pyre-fixme[14]: Inconsistent override
-    def evaluate_true(self, params: Mapping[str, float]) -> torch.Tensor:
-        """
-        Args:
-            params: A dictionary with key "x0".
-        """
-        value = params["x0"]
-        return torch.full(
-            (len(self.outcome_names), self.n_steps), value, dtype=torch.float64
-        )
-
-
-def get_discrete_search_space() -> SearchSpace:
+def get_discrete_search_space(n_values: int = 20) -> SearchSpace:
     return SearchSpace(
         parameters=[
             ChoiceParameter(
-                name="x0", parameter_type=ParameterType.INT, values=list(range(20))
+                name="x0",
+                parameter_type=ParameterType.INT,
+                values=list(range(n_values)),
             )
         ]
     )
@@ -360,7 +349,8 @@ def get_async_benchmark_problem(
         optimization_config=optimization_config,
         test_function=test_function,
         num_trials=4,
-        optimal_value=19.0,
+        baseline_value=19 if lower_is_better else 0,
+        optimal_value=0 if lower_is_better else 19,
         step_runtime_function=step_runtime_fn,
     )
 
@@ -371,3 +361,13 @@ def get_benchmark_metric() -> BenchmarkMetric:
 
 def get_benchmark_map_metric() -> BenchmarkMapMetric:
     return BenchmarkMapMetric(name="test", lower_is_better=True)
+
+
+def get_benchmark_time_varying_metric() -> BenchmarkTimeVaryingMetric:
+    return BenchmarkTimeVaryingMetric(name="test", lower_is_better=True)
+
+
+def get_benchmark_map_unavailable_while_running_metric() -> (
+    BenchmarkMapUnavailableWhileRunningMetric
+):
+    return BenchmarkMapUnavailableWhileRunningMetric(name="test", lower_is_better=True)

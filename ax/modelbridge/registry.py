@@ -22,7 +22,6 @@ from inspect import isfunction, signature
 from logging import Logger
 from typing import Any, NamedTuple
 
-import torch
 from ax.core.data import Data
 from ax.core.experiment import Experiment
 from ax.core.generator_run import GeneratorRun
@@ -36,11 +35,10 @@ from ax.modelbridge.transforms.choice_encode import (
     ChoiceToNumericChoice,
     OrderedChoiceToIntegerRange,
 )
-from ax.modelbridge.transforms.convert_metric_names import ConvertMetricNames
 from ax.modelbridge.transforms.derelativize import Derelativize
 from ax.modelbridge.transforms.fill_missing_parameters import FillMissingParameters
 from ax.modelbridge.transforms.int_range_to_choice import IntRangeToChoice
-from ax.modelbridge.transforms.int_to_float import IntToFloat
+from ax.modelbridge.transforms.int_to_float import IntToFloat, LogIntToFloat
 from ax.modelbridge.transforms.ivw import IVW
 from ax.modelbridge.transforms.log import Log
 from ax.modelbridge.transforms.logit import Logit
@@ -69,13 +67,16 @@ from ax.utils.common.kwargs import (
 )
 from ax.utils.common.logger import get_logger
 from ax.utils.common.serialization import callable_from_reference, callable_to_reference
-from ax.utils.common.typeutils import checked_cast
 from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
 from botorch.models.fully_bayesian_multitask import SaasFullyBayesianMultiTaskGP
-from pyre_extensions import none_throws
+from pyre_extensions import assert_is_instance, none_throws
 
 logger: Logger = get_logger(__name__)
 
+# This set of transforms uses continuous relaxation to handle discrete parameters.
+# All candidate generation is done in the continuous space, and the generated
+# candidates are rounded to fit the original search space. This is can be
+# suboptimal when there are discrete parameters with a small number of options.
 Cont_X_trans: list[type[Transform]] = [
     FillMissingParameters,
     RemoveFixed,
@@ -87,8 +88,30 @@ Cont_X_trans: list[type[Transform]] = [
     UnitX,
 ]
 
+# This is a modification of Cont_X_trans that aims to avoid continuous relaxation
+# where possible. It replaces IntToFloat with LogIntToFloat, which is only transforms
+# log-scale integer parameters, which still use continuous relaxation. Other discrete
+# transforms will remain discrete. When used with MBM, a Normalize input transform
+# will be added to replace the UnitX transform. This setup facilitates the use of
+# optimize_acqf_mixed_alternating, which is a more efficient acquisition function
+# optimizer for mixed discrete/continuous problems.
+MBM_X_trans: list[type[Transform]] = [
+    FillMissingParameters,
+    RemoveFixed,
+    OrderedChoiceToIntegerRange,
+    OneHot,
+    LogIntToFloat,
+    Log,
+    Logit,
+]
+
+
 Discrete_X_trans: list[type[Transform]] = [IntRangeToChoice]
 
+# This is a modification of Cont_X_trans that replaces OneHot and
+# OrderedChoiceToIntegerRange with ChoiceToNumericChoice. This results in retaining
+# all choice parameters as discrete, while using continuous relaxation for integer
+# valued RangeParameters.
 Mixed_transforms: list[type[Transform]] = [
     FillMissingParameters,
     RemoveFixed,
@@ -105,15 +128,6 @@ Y_trans: list[type[Transform]] = [IVW, Derelativize, StandardizeY]
 # call `list.__add__` but got `List[Type[SearchSpaceToChoice]]`.
 TS_trans: list[type[Transform]] = Y_trans + [SearchSpaceToChoice]
 
-# Multi-type MTGP transforms
-MT_MTGP_trans: list[type[Transform]] = Cont_X_trans + [
-    Derelativize,
-    ConvertMetricNames,
-    TrialAsTask,
-    StratifiedStandardizeY,
-    TaskChoiceToIntTaskChoice,
-]
-
 # Single-type MTGP transforms
 ST_MTGP_trans: list[type[Transform]] = Cont_X_trans + [
     Derelativize,
@@ -122,14 +136,12 @@ ST_MTGP_trans: list[type[Transform]] = Cont_X_trans + [
     TaskChoiceToIntTaskChoice,
 ]
 
-# Single-type MTGP transforms
-Specified_Task_ST_MTGP_trans: list[type[Transform]] = Cont_X_trans + [
+MBM_MTGP_trans: list[type[Transform]] = MBM_X_trans + [
     Derelativize,
+    TrialAsTask,
     StratifiedStandardizeY,
     TaskChoiceToIntTaskChoice,
 ]
-
-STANDARD_TORCH_BRIDGE_KWARGS: dict[str, Any] = {"torch_dtype": torch.double}
 
 
 class ModelSetup(NamedTuple):
@@ -155,14 +167,12 @@ MODEL_KEY_TO_MODEL_SETUP: dict[str, ModelSetup] = {
     "BoTorch": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=ModularBoTorchModel,
-        transforms=Cont_X_trans + Y_trans,
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
+        transforms=MBM_X_trans + Y_trans,
     ),
     "Legacy_GPEI": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=BotorchModel,
         transforms=Cont_X_trans + Y_trans,
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
     ),
     "EB": ModelSetup(
         bridge_class=DiscreteModelBridge,
@@ -192,42 +202,37 @@ MODEL_KEY_TO_MODEL_SETUP: dict[str, ModelSetup] = {
     "ST_MTGP": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=ModularBoTorchModel,
-        transforms=ST_MTGP_trans,
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
+        transforms=MBM_MTGP_trans,
     ),
     "BO_MIXED": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=ModularBoTorchModel,
         transforms=Mixed_transforms + Y_trans,
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
     ),
     "SAASBO": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=ModularBoTorchModel,
-        transforms=Cont_X_trans + Y_trans,
+        transforms=MBM_X_trans + Y_trans,
         default_model_kwargs={
             "surrogate_spec": SurrogateSpec(
                 botorch_model_class=SaasFullyBayesianSingleTaskGP
             )
         },
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
     ),
     "SAAS_MTGP": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=ModularBoTorchModel,
-        transforms=ST_MTGP_trans,
+        transforms=MBM_MTGP_trans,
         default_model_kwargs={
             "surrogate_spec": SurrogateSpec(
                 botorch_model_class=SaasFullyBayesianMultiTaskGP
             )
         },
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
     ),
     "Contextual_SACBO": ModelSetup(
         bridge_class=TorchModelBridge,
         model_class=SACBO,
         transforms=Cont_X_trans + Y_trans,
-        standard_bridge_kwargs=STANDARD_TORCH_BRIDGE_KWARGS,
     ),
 }
 
@@ -534,7 +539,7 @@ def _decode_callables_from_references(kwarg_dict: dict[str, Any]) -> dict[str, A
     """
     return {
         k: (
-            callable_from_reference(checked_cast(str, v.get("value")))
+            callable_from_reference(assert_is_instance(v.get("value"), str))
             if isinstance(v, dict) and v.get("is_callable_as_path", False)
             else v
         )

@@ -26,7 +26,6 @@ from ax.core.search_space import SearchSpace
 from ax.core.types import ComparisonOp
 from ax.exceptions.core import UserInputError
 from ax.utils.common.testutils import TestCase
-from ax.utils.common.typeutils import checked_cast
 from botorch.test_functions.base import ConstrainedBaseTestProblem
 from botorch.test_functions.multi_objective import BraninCurrin, ConstrainedBraninCurrin
 from botorch.test_functions.synthetic import (
@@ -60,6 +59,7 @@ class TestBenchmarkProblem(TestCase):
                 optimization_config=optimization_config,
                 num_trials=1,
                 optimal_value=0.0,
+                baseline_value=1.0,
                 search_space=SearchSpace(parameters=[]),
                 test_function=test_function,
                 n_best_points=2,
@@ -76,6 +76,7 @@ class TestBenchmarkProblem(TestCase):
                 num_trials=1,
                 optimal_value=0.0,
                 search_space=SearchSpace(parameters=[]),
+                baseline_value=1.0,
                 test_function=test_function,
                 n_best_points=1,
                 report_inference_value_as_trace=True,
@@ -102,9 +103,10 @@ class TestBenchmarkProblem(TestCase):
                 name="foo",
                 optimization_config=opt_config,
                 num_trials=1,
-                optimal_value=0.0,
+                optimal_value=1.0,
                 search_space=SearchSpace(parameters=[]),
                 test_function=test_function,
+                baseline_value=0.0,
             )
 
         opt_config = OptimizationConfig(
@@ -130,6 +132,7 @@ class TestBenchmarkProblem(TestCase):
                 optimal_value=0.0,
                 search_space=SearchSpace(parameters=[]),
                 test_function=test_function,
+                baseline_value=1.0,
             )
 
     def test_single_objective_from_botorch(self) -> None:
@@ -138,6 +141,7 @@ class TestBenchmarkProblem(TestCase):
                 test_problem_class=botorch_test_problem.__class__,
                 test_problem_kwargs={},
                 num_trials=1,
+                baseline_value=100.0,
             )
 
             # Test search space
@@ -220,14 +224,14 @@ class TestBenchmarkProblem(TestCase):
         )
 
         self.assertEqual(
-            checked_cast(BenchmarkMetric, metric).observe_noise_sd,
+            assert_is_instance(metric, BenchmarkMetric).observe_noise_sd,
             observe_noise_sd,
         )
 
         # TODO: Support observing noise variance only for some outputs
         for constraint in outcome_constraints:
             self.assertEqual(
-                checked_cast(BenchmarkMetric, constraint.metric).observe_noise_sd,
+                assert_is_instance(constraint.metric, BenchmarkMetric).observe_noise_sd,
                 observe_noise_sd,
             )
 
@@ -317,6 +321,7 @@ class TestBenchmarkProblem(TestCase):
             lower_is_better=False,
             num_trials=1,
             test_problem_kwargs={},
+            baseline_value=-8,
         )
         self.assertFalse(test_problem.optimization_config.objective.minimize)
 
@@ -326,7 +331,7 @@ class TestBenchmarkProblem(TestCase):
         ):
             create_problem_from_botorch(
                 test_problem_class=Branin,
-                lower_is_better=False,
+                lower_is_better=True,
                 num_trials=1,
                 test_problem_kwargs={},
                 status_quo_params={"x0": 20.0, "x1": 20.0},
